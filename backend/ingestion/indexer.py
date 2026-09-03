@@ -42,8 +42,6 @@ BM25_PATH = Path(os.getenv("BM25_INDEX_PATH", "backend/indexes/bm25.pkl"))
 DATA_DIR = os.getenv("DATA_DIR", "data")
 
 SCHEMA = f"""
-CREATE EXTENSION IF NOT EXISTS vector;
-
 CREATE TABLE IF NOT EXISTS chunks (
     chunk_id        TEXT PRIMARY KEY,
     source_file     TEXT NOT NULL,
@@ -78,6 +76,13 @@ def connect() -> psycopg.Connection:
             "DATABASE_URL is not set. Copy .env.example to .env and fill it in."
         )
     conn = psycopg.connect(DATABASE_URL)
+    # Must run before register_vector(): on a fresh database the `vector`
+    # type doesn't exist until this extension is created, and register_vector
+    # looks that type up immediately. Creating the schema's tables/indexes
+    # can still wait until ensure_schema().
+    with conn.cursor() as cur:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    conn.commit()
     register_vector(conn)
     return conn
 
