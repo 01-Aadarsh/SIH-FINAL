@@ -50,7 +50,7 @@ User query
 | Reranker | cross-encoder, `ms-marco-MiniLM` class, local |
 | LLM primary | Ollama, local quantized model — works offline |
 | LLM fallback | Groq API — used when local is unavailable |
-| Translation | Bhashini API (Govt of India) or Google Translate |
+| Translation | Sarvam AI (have working access now). PS names Bhashini specifically — switch if a Bhashini key arrives before the demo. Not wired up yet; frontend and demo prep come first. |
 | Frontend | React / Next.js |
 | Hosting | Render or Railway (backend), Vercel (frontend) |
 
