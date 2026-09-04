@@ -50,6 +50,33 @@ same edges, same bounded single retry. What changed is how it's driven:
 `backend/api/main.py`. Every node that does I/O (LLM calls, pgvector
 queries) is a real `async def`, not a sync function offloaded to a thread.
 
+**Multilingual is wired into `/query` now** (`backend/api/translation.py`,
+Sarvam AI): question translates to English before retrieval, answer
+translates back to `QueryRequest.language` after generation. Retrieval and
+the LLM prompt never see anything but English — `language` only affects
+the two translation calls at the edges. Not wired into `/query/stream` yet
+(translating a live token stream is a separate, harder problem —
+sentence-boundary detection against a partial buffer). Sarvam's
+`mayura:v1` model hard-caps input at exactly 1000 characters — confirmed
+against the live API, not from docs — so both directions chunk text at
+sentence boundaries and translate the pieces concurrently
+(`api/text_chunking.py`, shared with TTS below). A same-language request
+(the `en-IN` default) skips translation entirely: zero added latency,
+identical behavior to before this existed.
+
+**TTS is opt-in on `/query`** (`QueryRequest.synthesize_audio`,
+`backend/api/tts.py`, Groq). English-only, always — Groq's TTS models
+(`canopylabs/orpheus-v1-english`, `canopylabs/orpheus-arabic-saudi`,
+confirmed by querying this project's own account) have no Indian-language
+voice, so it reads the pre-translation English answer regardless of
+`language`. **Not yet functional**: this Groq account hasn't accepted
+`canopylabs/orpheus-v1-english`'s model terms, which blocks even
+discovering a valid voice name — `GROQ_TTS_VOICE` is deliberately unset
+rather than guessed. `/query` degrades gracefully either way
+(`audio_base64: null`, never a failed request) — see `env.example.txt` for
+the one manual step (visit the Groq Playground, accept the terms, set
+`GROQ_TTS_VOICE`) that turns this on.
+
 ## Tech stack
 
 | Layer | Choice |
@@ -62,7 +89,8 @@ queries) is a real `async def`, not a sync function offloaded to a thread.
 | Reranker | cross-encoder, `ms-marco-MiniLM` class, local |
 | LLM primary | Groq API (`AsyncGroq`), direct — no local-first guessing/timeout on the live path |
 | LLM offline fallback | Ollama, local quantized model, gated behind `OFFLINE_MODE=true` — explicit operator flag for venue WiFi failure, not an auto-detected condition |
-| Translation | Sarvam AI (have working access now). PS names Bhashini specifically — switch if a Bhashini key arrives before the demo. Not wired up yet; frontend and demo prep come first. |
+| Translation | Sarvam AI, wired into `/query` (question in, answer out — see below). PS names Bhashini specifically — switch if a Bhashini key arrives before the demo. |
+| TTS | Groq (`canopylabs/orpheus-v1-english`), opt-in on `/query`, English-only. Not yet functional pending model-terms acceptance on the Groq account — see below. |
 | Frontend | React / Next.js |
 | Hosting | Render or Railway (backend, `Procfile` — `WEB_CONCURRENCY` workers, default 2: each worker loads its own copy of the embedding + cross-encoder models in memory, so raise it only if the host has RAM to match), Vercel (frontend) |
 
@@ -85,7 +113,7 @@ ip-sakti/
 │   ├── retrieval/        bm25_search.py, dense_search.py, fusion.py, reranker.py
 │   ├── generation/       prompts.py, llm_client.py, citation.py
 │   ├── graph/            state.py, nodes.py, build_graph.py
-│   ├── api/              main.py
+│   ├── api/              main.py, translation.py, tts.py, text_chunking.py
 │   ├── Procfile          multi-worker launch command (Render/Railway)
 │   ├── requirements.txt
 │   └── .env.example

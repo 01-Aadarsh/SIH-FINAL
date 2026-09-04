@@ -8,6 +8,16 @@ pool) under a wall-clock timeout. /query/stream is the same pipeline,
 answer tokens delivered as Server-Sent Events as they arrive from the LLM
 instead of waiting for the full answer.
 
+/query only (not /query/stream — translating a live token stream is a
+separate, harder problem: sentence-boundary detection against a partial
+buffer, not covered here) additionally wraps the graph in a translation
+bridge (api/translation.py, Sarvam AI): the question translates to English
+before retrieval, the answer translates back to QueryRequest.language after
+generation — retrieval and the LLM prompt never see anything but English.
+Optionally also returns a spoken-English reading of the answer via Groq TTS
+(api/tts.py, QueryRequest.synthesize_audio) — English-only regardless of
+`language`, since Groq has no Indian-language voice to speak in.
+
 Cancellation: because the graph is now driven by real async I/O (async
 psycopg, AsyncGroq/ollama.AsyncClient) instead of a thread-pool future,
 asyncio.wait_for's timeout can actually cancel the in-flight call — the
@@ -38,6 +48,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from api.translation import TARGET_LANGUAGE_CODES, translate_text
+from api.tts import synthesize_speech
 from generation.citation import attach_citations, is_abstention
 from generation.llm_client import astream_generate
 from graph.build_graph import build_graph
@@ -126,6 +138,29 @@ class QueryRequest(BaseModel):
             "when retrieval finds nothing relevant, not a special case."
         ),
     )
+    language: Literal[*TARGET_LANGUAGE_CODES] = Field(
+        default="en-IN",
+        description=(
+            "Language of `question`, and the language `answer` is translated "
+            "back into before this responds. Retrieval/generation always run "
+            "in English regardless of this value — see api/translation.py. "
+            "'en-IN' (the default) skips translation entirely: zero added "
+            "latency, same behavior as before this field existed. Any other "
+            "value that fails to translate (Sarvam outage, bad key, timeout) "
+            "silently falls back to an English `answer` rather than erroring "
+            "— translation failures never turn into a failed request."
+        ),
+    )
+    synthesize_audio: bool = Field(
+        default=False,
+        description=(
+            "If true, also return `audio_base64` — a spoken-English reading "
+            "of the answer, regardless of `language` (Groq's TTS has no "
+            "Indian-language voice; see api/tts.py). Off by default: it adds "
+            "real latency (one or more extra Groq calls after generation) "
+            "that most callers won't want paid on every request."
+        ),
+    )
 
 
 class Citation(BaseModel):
@@ -158,11 +193,27 @@ class Flags(BaseModel):
 
 
 class QueryResponse(BaseModel):
-    answer: str
+    answer: str = Field(
+        description=(
+            "In the request's `language` if translation succeeded, English "
+            "if `language` was already English, or English as a silent "
+            "fallback if translation failed — see QueryRequest.language."
+        )
+    )
     citations: list[Citation] = Field(
         description="Always [] when flags.abstained is true — nothing was actually used to answer."
     )
     flags: Flags
+    audio_base64: str | None = Field(
+        default=None,
+        description=(
+            "Base64-encoded WAV, always a reading of the ENGLISH answer "
+            "regardless of `language`/`answer` (Groq has no Indian-language "
+            "voice — see api/tts.py) — do not present this as being in the "
+            "user's selected language. Null if synthesize_audio was false, "
+            "GROQ_TTS_VOICE isn't configured, or synthesis failed."
+        ),
+    )
 
 
 class IngestRequest(BaseModel):
@@ -195,13 +246,15 @@ def health():
     response_model=QueryResponse,
     summary="Answer a question from the indexed documents",
     description=(
-        "Runs the full pipeline: query rewrite -> hybrid retrieval -> "
-        "cross-encoder reranking -> grounded generation -> citation "
-        "attachment. Answers only from retrieved context; abstains "
-        "(flags.abstained=true) if the context doesn't contain the answer "
-        "— including when jurisdiction='international' finds no indexed "
-        "documents. Single JSON response; see /query/stream for token "
-        "streaming."
+        "Runs the full pipeline: translate question to English (if needed) "
+        "-> query rewrite -> hybrid retrieval -> cross-encoder reranking -> "
+        "grounded generation -> citation attachment -> translate answer back "
+        "to `language` (if needed) -> optional English TTS. Answers only "
+        "from retrieved context; abstains (flags.abstained=true) if the "
+        "context doesn't contain the answer — including when "
+        "jurisdiction='international' finds no indexed documents. Single "
+        "JSON response; see /query/stream for token streaming (English "
+        "only — translation isn't wired into the streaming path)."
     ),
     responses={
         422: {"description": "Invalid request body (e.g. jurisdiction not 'india' or 'international')."},
@@ -214,11 +267,16 @@ async def query(req: QueryRequest):
     app_graph = _get_graph()
     history = [turn.model_dump() for turn in req.history]
 
+    # STEP A: translate the question into English. A no-op call (returns
+    # immediately, no HTTP request) when language is already English —
+    # translate_text's own fallback rule, not special-cased here.
+    english_question = await translate_text(req.question, req.language, "en-IN")
+
     try:
         result = await asyncio.wait_for(
             app_graph.ainvoke(
                 {
-                    "query": req.question,
+                    "query": english_question,
                     "history": history,
                     "jurisdiction": req.jurisdiction,
                     "flags": dict(DEFAULT_FLAGS),
@@ -238,10 +296,29 @@ async def query(req: QueryRequest):
         log.exception("Unhandled error in /query")
         raise HTTPException(status_code=500, detail="Internal error processing the query.")
 
+    english_answer = result["answer"]
+
+    # TTS reads the pre-translation English answer — Groq has no
+    # Indian-language voice, so synthesizing from a translated answer would
+    # either fail outright or mispronounce every non-English word. Runs
+    # concurrently with STEP C's translation call: the two are independent
+    # (different providers, different inputs) and neither depends on the
+    # other's result, so there's no reason to pay their latencies serially.
+    translate_out = translate_text(english_answer, "en-IN", req.language)
+    audio_task = (
+        asyncio.ensure_future(synthesize_speech(english_answer, "en-IN"))
+        if req.synthesize_audio
+        else None
+    )
+
+    translated_answer = await translate_out
+    audio_base64 = await audio_task if audio_task is not None else None
+
     return QueryResponse(
-        answer=result["answer"],
+        answer=translated_answer,
         citations=result.get("citations") or [],
         flags=result.get("flags") or {},
+        audio_base64=audio_base64,
     )
 
 
