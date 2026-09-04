@@ -190,6 +190,16 @@ class Flags(BaseModel):
         default=False,
         description="True if the bounded retry-once path fired (weak initial rerank score). Informational only.",
     )
+    weak_grounding: bool = Field(
+        default=False,
+        description=(
+            "True when BM25 found a strong lexical match but the cross-encoder's "
+            "top confidence was still low — a structured signal that retrieval/"
+            "reranking likely underperformed on this query specifically, distinct "
+            "from the corpus genuinely lacking an answer. See retrieval/reranker.py. "
+            "Informational only — does not affect whether the request abstains."
+        ),
+    )
 
 
 class QueryResponse(BaseModel):
@@ -204,6 +214,16 @@ class QueryResponse(BaseModel):
         description="Always [] when flags.abstained is true — nothing was actually used to answer."
     )
     flags: Flags
+    formulation_category: str = Field(
+        description=(
+            "Deterministic keyword-based triage of the question into one of "
+            "graph.formulation.FORMULATION_CATEGORIES (classical, proprietary, "
+            "phytopharmaceutical, ayurveda_aahar, cosmetic) — see graph/"
+            "formulation.py. A coarse heuristic used to frame the generation "
+            "prompt, not a legal determination; defaults to 'classical' when "
+            "no category-specific keyword matched."
+        )
+    )
     audio_base64: str | None = Field(
         default=None,
         description=(
@@ -318,6 +338,7 @@ async def query(req: QueryRequest):
         answer=translated_answer,
         citations=result.get("citations") or [],
         flags=result.get("flags") or {},
+        formulation_category=result.get("formulation_category") or "classical",
         audio_base64=audio_base64,
     )
 
@@ -355,25 +376,27 @@ async def query_stream(req: QueryRequest):
             rewrite_state = await rewrite_query({"query": req.question, "history": history})
             rewritten = rewrite_state["rewritten_query"]
 
-            reranked, retried = await asyncio.wait_for(
+            reranked, flags, formulation_category, statutory_tags = await asyncio.wait_for(
                 run_retrieval_stage(rewritten, req.jurisdiction),
                 timeout=RETRIEVAL_TIMEOUT,
             )
 
             parts: list[str] = []
-            async for token in astream_generate(rewritten, reranked):
+            async for token in astream_generate(rewritten, reranked, formulation_category, statutory_tags):
                 parts.append(token)
                 yield _sse("token", {"text": token})
 
             answer = "".join(parts)
             abstained = is_abstention(answer)
             citations = [] if abstained else attach_citations(reranked)
+            flags["abstained"] = abstained
             yield _sse(
                 "done",
                 {
                     "answer": answer,
                     "citations": citations,
-                    "flags": {"abstained": abstained, "retried": retried},
+                    "flags": flags,
+                    "formulation_category": formulation_category,
                 },
             )
         except asyncio.TimeoutError:

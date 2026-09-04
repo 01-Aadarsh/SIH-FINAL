@@ -10,7 +10,7 @@ Smart India Hackathon 2026, problem statement **SIH26045**, Ministry of Ayush.
 
 A user asks a question about Ayurveda-related IP or regulatory rules. The system retrieves relevant text from official Indian government documents and answers using only that text, showing exactly which document, page and section each answer came from. If the answer isn't in the documents, it says so instead of guessing.
 
-**Scope:** National (Indian) framework only. International IP regimes are future work, not built.
+**Scope:** National (Indian) framework is what's actually indexed. International jurisdiction routing exists end to end (API field, DB column, per-jurisdiction BM25 index, dense-retrieval SQL filter) and correctly abstains rather than crashing or defaulting to Indian law — but `data/international/` has no documents in it yet (WIPO GRATK Treaty 2024, Nagoya Protocol, Budapest Treaty, PCT — see its README for what's expected and why none of it can be fabricated here). Treat "international" as scaffolded, not built.
 
 ## Why the architecture is what it is
 
@@ -29,11 +29,12 @@ Independent evaluations of commercial legal AI tools found hallucination rates o
 ## Pipeline
 
 ```
-User query (+ jurisdiction: india | international)
+User query (+ jurisdiction: india | international, + language)
   → Query rewriter (standalone question using chat history)
-  → Hybrid retrieval (BM25 + dense, merged by RRF, filtered to jurisdiction) → top 20
-  → Cross-encoder reranker                                                  → top 5
-  → Grounded generation (LLM, retrieved text only — streamed as SSE tokens on /query/stream)
+  → Formulation triage (deterministic keyword classifier — see below)
+  → Hybrid retrieval (BM25 + dense, both filtered to jurisdiction at the source) → top 20
+  → Cross-encoder reranker (calibrated sigmoid confidence)                      → top 5
+  → Grounded generation (LLM, retrieved text + formulation framing — streamed as SSE tokens on /query/stream)
   → Citation attacher (code-attached, verified)
   → Answer + sources  |  or  Abstains
 ```
@@ -42,11 +43,56 @@ User query (+ jurisdiction: india | international)
 international documents are indexed yet (`data/international/` is a
 placeholder, see its README). That's the correct behavior, not a bug: the
 alternative (silently falling back to Indian law, or crashing) would be
-worse than an honest "not found."
+worse than an honest "not found." BM25 is now genuinely partitioned per
+jurisdiction (`ingestion/indexer.py::build_bm25` builds one BM25Okapi per
+jurisdiction, not one shared index post-filtered afterward) — the filter
+applies during retrieval, not as cleanup after.
 
-The graph itself (`backend/graph/build_graph.py`) is unchanged — same nodes,
-same edges, same bounded single retry. What changed is how it's driven:
-`compiled_graph.ainvoke()`, not `.invoke()` via a thread pool — see
+**Formulation triage** (`backend/graph/formulation.py`) classifies every
+question into one of 5 categories (classical / proprietary (P&P) /
+phytopharmaceutical / Ayurveda-Aahar / cosmetic) via keyword matching — not
+an LLM call, deliberately: this project's retry mechanism exists because
+LLM-driven decisions aren't perfectly reproducible run to run (see below),
+and a second LLM call for triage would reintroduce that one step earlier.
+The category + its mapped statutory tags get injected into the generation
+prompt as advisory framing, never as ground truth the model cites. A
+matching best-effort tagger (`ingestion/chunker.py::tag_statutory_metadata`)
+keyword/filename-tags chunks at ingestion time with the same tag
+vocabulary — 572/2907 chunks currently carry at least one tag. Both the
+classifier and the tagger are a first pass a domain expert should review,
+not a finished legal taxonomy — said plainly in both modules' docstrings.
+
+**Retrieval determinism**: BM25's tokenizer now applies IPR/AYUSH domain
+synonym normalization (`ingestion/indexer.py::DOMAIN_SYNONYMS` — trademark
+↔ trade mark, IPR ↔ intellectual property rights, TK ↔ traditional
+knowledge, BD Act ↔ Biological Diversity Act, and others) before indexing
+and before every query, via the same shared `tokenize()` function so the
+two can't drift apart. Found and fixed from a real, reproduced bug: "What
+is a trademark?" scored the actual Trade Marks Act far below unrelated
+documents, because the Act's own text says "trade marks" (two words) and
+BM25 is exact-token matching. `tests/test_retrieval_determinism.py` proves
+(bit-identical scores, 10 runs) that retrieve()/rerank_node() are now fully
+deterministic — the remaining source of flakiness is exclusively the
+bounded retry's own LLM-driven rephrase step, which fires deterministically
+now (same decision every run) but still isn't itself reproducible when it
+does fire. That gap is real and stayed out of scope for this pass — the
+test suite says so directly rather than claiming it's fixed.
+
+The cross-encoder reranker (`backend/retrieval/reranker.py`) outputs a
+calibrated `sigmoid(raw_logit)` confidence in [0,1] now, not a raw
+unbounded logit — `RERANK_SCORE_THRESHOLD = 0.15`, set against a real
+(if small) empirical spread: on-topic queries scored 0.92-0.999, queries
+with no real answer in this corpus scored ~0.000. A `weak_grounding` flag
+(`graph/nodes.py::rerank_node`) fires when BM25 found a strong lexical
+match but cross-encoder confidence is still low — a structured signal that
+retrieval/reranking likely underperformed on that specific query, distinct
+from the corpus genuinely lacking an answer, surfaced in the API response
+rather than only visible as a generic abstention.
+
+The graph itself (`backend/graph/build_graph.py`) has one new node
+(triage_formulation, sync, no I/O) beyond the async rewrite from before —
+same bounded single retry, same deterministic-DAG shape otherwise. Driven
+by `compiled_graph.ainvoke()`, not `.invoke()` via a thread pool — see
 `backend/api/main.py`. Every node that does I/O (LLM calls, pgvector
 queries) is a real `async def`, not a sync function offloaded to a thread.
 
@@ -62,7 +108,15 @@ against the live API, not from docs — so both directions chunk text at
 sentence boundaries and translate the pieces concurrently
 (`api/text_chunking.py`, shared with TTS below). A same-language request
 (the `en-IN` default) skips translation entirely: zero added latency,
-identical behavior to before this existed.
+identical behavior to before this existed. A fixed lexicon of Ayurvedic
+technical terms (Churna, Bhasma, Taila, Kwatha, Rasa Shastra, Asava,
+Arishta — Latin-script variants and Devanagari) is protected around every
+Sarvam call: swapped for an opaque placeholder before translation, restored
+to the canonical English spelling after, so Sarvam never sees the term at
+all and can't transliterate or gloss it into something else. Verified
+against the live API both directions, including a Devanagari-script input
+("भस्म" → placeholder → translated → restored to "Bhasma", not "ash" or any
+other approximation).
 
 **TTS is opt-in on `/query`** (`QueryRequest.synthesize_audio`,
 `backend/api/tts.py`, Groq). English-only, always — Groq's TTS models
@@ -112,8 +166,10 @@ ip-sakti/
 │   ├── ingestion/        loader.py, chunker.py, indexer.py    [DONE, tested]
 │   ├── retrieval/        bm25_search.py, dense_search.py, fusion.py, reranker.py
 │   ├── generation/       prompts.py, llm_client.py, citation.py
-│   ├── graph/            state.py, nodes.py, build_graph.py
+│   ├── graph/            state.py, nodes.py, build_graph.py, formulation.py
 │   ├── api/              main.py, translation.py, tts.py, text_chunking.py
+│   ├── tests/            test_retrieval_determinism.py (pytest)
+│   ├── pytest.ini
 │   ├── Procfile          multi-worker launch command (Render/Railway)
 │   ├── requirements.txt
 │   └── .env.example

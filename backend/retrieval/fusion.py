@@ -47,7 +47,8 @@ async def _fetch_metadata(chunk_ids: list[str]) -> dict[str, dict]:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT chunk_id, source_file, page_number, section_heading, text, jurisdiction
+                SELECT chunk_id, source_file, page_number, section_heading, text,
+                       jurisdiction, statutory_tags
                 FROM chunks
                 WHERE chunk_id = ANY(%s);
                 """,
@@ -64,6 +65,7 @@ async def _fetch_metadata(chunk_ids: list[str]) -> dict[str, dict]:
             "section_heading": row[3],
             "text": row[4],
             "jurisdiction": row[5],
+            "statutory_tags": row[6],
         }
         for row in rows
     }
@@ -101,6 +103,7 @@ async def fuse(
             "section_heading": result["section_heading"],
             "text": result["text"],
             "jurisdiction": jurisdiction,
+            "statutory_tags": result.get("statutory_tags") or [],
         }
 
     missing = [cid for cid in scores if cid not in metadata]
@@ -130,7 +133,7 @@ async def fuse(
 
 async def search(query: str, top_k: int = 20, jurisdiction: str = "india") -> list[dict]:
     """Run both retrievers and fuse their results for a single query."""
-    bm25_results = await asyncio.to_thread(bm25_search, query, top_k=top_k)
+    bm25_results = await asyncio.to_thread(bm25_search, query, top_k=top_k, jurisdiction=jurisdiction)
     dense_results = await dense_search(query, top_k=top_k, jurisdiction=jurisdiction)
     return await fuse(bm25_results, dense_results, top_k=top_k, jurisdiction=jurisdiction)
 

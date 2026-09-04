@@ -20,6 +20,7 @@ import logging
 
 from generation.citation import attach_citations, is_abstention
 from generation.llm_client import acomplete, agenerate
+from graph.formulation import CATEGORY_STATUTORY_TAGS, classify_formulation
 from graph.state import DEFAULT_FLAGS, DEFAULT_JURISDICTION, GraphState
 from retrieval.bm25_search import search as bm25_search_sync
 from retrieval.dense_search import search as dense_search
@@ -31,12 +32,21 @@ log = logging.getLogger(__name__)
 FUSED_TOP_K = 20
 RERANK_TOP_K = 5
 
-# ms-marco cross-encoder outputs raw logits (observed range roughly -3 to
-# +9 on this corpus): positive scores tracked genuinely relevant chunks in
-# testing, negative scores tracked irrelevant ones. 0.0 is a reasonable
-# starting cutoff, not a rigorously tuned one — revisit if the retry fires
-# too often or too rarely in practice.
-RERANK_SCORE_THRESHOLD = 0.0
+# rerank_score is now a calibrated sigmoid(raw_logit) in [0, 1] — see
+# retrieval/reranker.py's module docstring for the empirical spread this was
+# set against (on-topic queries: 0.92-0.999; queries with no real answer in
+# this corpus: ~0.000). 0.15 sits well above the "nothing here" cluster.
+RERANK_SCORE_THRESHOLD = 0.15
+
+# A separate, lower bar for the weak-grounding diagnostic below — distinct
+# from RERANK_SCORE_THRESHOLD (which decides whether to retry), this one
+# flags a specific, more informative situation: BM25 found what looks like
+# a real lexical hit (raw score above BM25_STRONG_MATCH), but the
+# cross-encoder still isn't confident. That combination means "probably
+# retrieval's fault, not the corpus's" — worth surfacing to a caller
+# distinctly from a generic abstention, per the fallback-diagnostic ask.
+BM25_STRONG_MATCH = 8.0
+WEAK_GROUNDING_CONFIDENCE = 0.10
 
 
 async def rewrite_query(state: GraphState) -> dict:
@@ -63,6 +73,19 @@ async def rewrite_query(state: GraphState) -> dict:
     return {"rewritten_query": rewritten or query}
 
 
+def triage_formulation_node(state: GraphState) -> dict:
+    """Deterministic keyword classification — no I/O, no LLM call. Runs
+    after rewrite_query (so it sees the standalone-question form) and
+    before retrieve. See graph/formulation.py for why this is intentionally
+    not LLM-based."""
+    query = state.get("rewritten_query") or state["query"]
+    category = classify_formulation(query)
+    return {
+        "formulation_category": category,
+        "statutory_tags": CATEGORY_STATUTORY_TAGS[category],
+    }
+
+
 async def retrieve(state: GraphState) -> dict:
     """Hybrid retrieval (BM25 + dense, fused by RRF) on the current query,
     scoped to state["jurisdiction"]. BM25 has no I/O (in-memory index), so
@@ -73,18 +96,34 @@ async def retrieve(state: GraphState) -> dict:
     query = state["rewritten_query"]
     jurisdiction = state.get("jurisdiction") or DEFAULT_JURISDICTION
 
-    bm25_results = await asyncio.to_thread(bm25_search_sync, query, top_k=FUSED_TOP_K)
+    bm25_results = await asyncio.to_thread(bm25_search_sync, query, top_k=FUSED_TOP_K, jurisdiction=jurisdiction)
     dense_results = await dense_search(query, top_k=FUSED_TOP_K, jurisdiction=jurisdiction)
     candidates = await fuse(
         bm25_results, dense_results, top_k=FUSED_TOP_K, jurisdiction=jurisdiction
     )
-    return {"candidates": candidates}
+    # Carried into rerank_node purely for the weak-grounding diagnostic
+    # below — not used for ranking or filtering.
+    bm25_top_score = max((r["score"] for r in bm25_results), default=0.0)
+    return {"candidates": candidates, "bm25_top_score": bm25_top_score}
 
 
 async def rerank_node(state: GraphState) -> dict:
     query = state["rewritten_query"]
     reranked = await asyncio.to_thread(rerank_sync, query, state["candidates"], top_k=RERANK_TOP_K)
-    return {"reranked": reranked}
+
+    flags = dict(state.get("flags") or {})
+    bm25_top_score = state.get("bm25_top_score", 0.0)
+    top_confidence = reranked[0]["rerank_score"] if reranked else 0.0
+    flags["weak_grounding"] = bm25_top_score >= BM25_STRONG_MATCH and top_confidence < WEAK_GROUNDING_CONFIDENCE
+    if flags["weak_grounding"]:
+        log.warning(
+            "Weak grounding: BM25 found a strong lexical match (score %.1f) but the "
+            "cross-encoder's top confidence is only %.3f — likely a retrieval/reranking "
+            "gap rather than the corpus genuinely lacking an answer.",
+            bm25_top_score, top_confidence,
+        )
+
+    return {"reranked": reranked, "flags": flags}
 
 
 def should_retry(state: GraphState) -> str:
@@ -131,7 +170,12 @@ async def retry_rewrite_query(state: GraphState) -> dict:
 
 async def generate_answer(state: GraphState) -> dict:
     query = state["rewritten_query"]
-    answer = await agenerate(query, state["reranked"])
+    answer = await agenerate(
+        query,
+        state["reranked"],
+        formulation_category=state.get("formulation_category"),
+        statutory_tags=state.get("statutory_tags"),
+    )
 
     flags = dict(state.get("flags") or {})
     flags["abstained"] = is_abstention(answer)
@@ -145,9 +189,11 @@ def attach_citations_node(state: GraphState) -> dict:
     return {"citations": attach_citations(state["reranked"])}
 
 
-async def run_retrieval_stage(rewritten_query: str, jurisdiction: str) -> tuple[list[dict], bool]:
-    """retrieve -> rerank -> bounded retry, composed from the same node
-    functions the compiled graph uses for this exact sequence (see
+async def run_retrieval_stage(
+    rewritten_query: str, jurisdiction: str
+) -> tuple[list[dict], dict, str, list[str]]:
+    """triage -> retrieve -> rerank -> bounded retry, composed from the same
+    node functions the compiled graph uses for this exact sequence (see
     build_graph.py) — not a reimplementation of the retry threshold logic.
 
     Exists for api/main.py's SSE streaming endpoint. LangGraph nodes return
@@ -159,12 +205,18 @@ async def run_retrieval_stage(rewritten_query: str, jurisdiction: str) -> tuple[
     pipeline. The non-streaming /query endpoint still uses the real
     compiled graph end to end; this helper's output is identical to what
     that graph produces up through reranking, by construction.
+
+    Returns (reranked, flags, formulation_category, statutory_tags) — flags
+    carries both "retried" and "weak_grounding" (see rerank_node), not just
+    the one bool this returned before formulation triage and the weak-
+    grounding diagnostic were added.
     """
     state: GraphState = {
         "rewritten_query": rewritten_query,
         "jurisdiction": jurisdiction,
         "flags": dict(DEFAULT_FLAGS),
     }
+    state.update(triage_formulation_node(state))
     state.update(await retrieve(state))
     state.update(await rerank_node(state))
 
@@ -173,4 +225,9 @@ async def run_retrieval_stage(rewritten_query: str, jurisdiction: str) -> tuple[
         state.update(await retrieve(state))
         state.update(await rerank_node(state))
 
-    return state["reranked"], state["flags"]["retried"]
+    return (
+        state["reranked"],
+        state["flags"],
+        state["formulation_category"],
+        state["statutory_tags"],
+    )

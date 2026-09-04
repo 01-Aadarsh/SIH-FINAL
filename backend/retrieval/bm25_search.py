@@ -1,9 +1,15 @@
 """
 BM25 sparse retrieval for IP-SAKTI.
 
-Loads the BM25 index built by ingestion.indexer and searches it with the
-identical tokenizer used at index time — imported, not redefined, because if
-the two ever diverge, BM25 silently stops matching with no error to tell you.
+Loads the per-jurisdiction BM25 indexes built by ingestion.indexer and
+searches with the identical tokenizer used at index time — imported, not
+redefined, because if the two ever diverge, BM25 silently stops matching
+with no error to tell you.
+
+One BM25Okapi per jurisdiction, not one shared index post-filtered
+afterward: jurisdiction is applied *during* the BM25 pass itself, the same
+way dense_search's SQL WHERE clause applies it during the dense pass — see
+ingestion/indexer.py::build_bm25 for why.
 
 Usage:
     python -m retrieval.bm25_search "Section 3(p) traditional knowledge"
@@ -28,15 +34,15 @@ log = logging.getLogger(__name__)
 
 BM25_PATH = Path(os.getenv("BM25_INDEX_PATH", "backend/indexes/bm25.pkl"))
 
-_bm25 = None
-_chunk_ids: list[str] | None = None
+_bm25_by_jurisdiction: dict | None = None
+_chunk_ids_by_jurisdiction: dict | None = None
 
 
 def _load_index():
     """Load and cache the BM25 pickle. Fails loudly if it isn't there yet."""
-    global _bm25, _chunk_ids
-    if _bm25 is not None:
-        return _bm25, _chunk_ids
+    global _bm25_by_jurisdiction, _chunk_ids_by_jurisdiction
+    if _bm25_by_jurisdiction is not None:
+        return _bm25_by_jurisdiction, _chunk_ids_by_jurisdiction
 
     if not BM25_PATH.exists():
         raise FileNotFoundError(
@@ -47,19 +53,29 @@ def _load_index():
     with open(BM25_PATH, "rb") as handle:
         payload = pickle.load(handle)
 
-    _bm25 = payload["bm25"]
-    _chunk_ids = payload["chunk_ids"]
-    log.info("Loaded BM25 index: %d chunks", len(_chunk_ids))
-    return _bm25, _chunk_ids
+    _bm25_by_jurisdiction = payload["bm25_by_jurisdiction"]
+    _chunk_ids_by_jurisdiction = payload["chunk_ids_by_jurisdiction"]
+    for jurisdiction, ids in _chunk_ids_by_jurisdiction.items():
+        log.info("Loaded BM25 index for jurisdiction=%s: %d chunks", jurisdiction, len(ids))
+    return _bm25_by_jurisdiction, _chunk_ids_by_jurisdiction
 
 
-def search(query: str, top_k: int = 20) -> list[dict]:
-    """Query -> top_k chunk_ids ranked by BM25 score, highest first.
+def search(query: str, top_k: int = 20, jurisdiction: str = "india") -> list[dict]:
+    """Query -> top_k chunk_ids ranked by BM25 score, highest first, scoped
+    to `jurisdiction`'s own index.
 
     Score positions map back to chunk_ids by index, since the pickle stores
-    chunk_ids in the same order as the corpus BM25Okapi was built from.
+    each jurisdiction's chunk_ids in the same order as the corpus its
+    BM25Okapi was built from.
     """
-    bm25, chunk_ids = _load_index()
+    bm25_by_jurisdiction, chunk_ids_by_jurisdiction = _load_index()
+
+    bm25 = bm25_by_jurisdiction.get(jurisdiction)
+    chunk_ids = chunk_ids_by_jurisdiction.get(jurisdiction, [])
+    if bm25 is None or not chunk_ids:
+        # A real, expected case (e.g. jurisdiction="international" before
+        # any international documents are indexed), not an error.
+        return []
 
     tokens = tokenize(query)
     if not tokens:

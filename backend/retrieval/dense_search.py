@@ -59,7 +59,7 @@ async def search(query: str, top_k: int = 20, jurisdiction: str = "india") -> li
             await cur.execute(
                 """
                 SELECT chunk_id, source_file, page_number, section_heading, text,
-                       1 - (embedding <=> %s) AS score
+                       statutory_tags, 1 - (embedding <=> %s) AS score
                 FROM chunks
                 WHERE jurisdiction = %s
                 ORDER BY embedding <=> %s
@@ -78,7 +78,8 @@ async def search(query: str, top_k: int = 20, jurisdiction: str = "india") -> li
             "page_number": row[2],
             "section_heading": row[3],
             "text": row[4],
-            "score": float(row[5]),
+            "statutory_tags": row[5],
+            "score": float(row[6]),
             "rank": rank,
         }
         for rank, row in enumerate(rows, start=1)

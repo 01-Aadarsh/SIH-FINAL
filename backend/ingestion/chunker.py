@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 
 from ingestion.loader import Page, load_directory, load_pdf
 
@@ -68,9 +68,67 @@ class Chunk:
     section_heading: str
     text: str
     jurisdiction: str = "india"
+    # Best-effort keyword tagging, not authoritative legal categorization —
+    # see tag_statutory_metadata() below for exactly what it checks and why
+    # it should be treated as a first pass, not a finished taxonomy.
+    statutory_tags: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# (source_file substring, text pattern, tag) — a chunk gets `tag` when its
+# source_file contains the substring AND its text matches the pattern. Tied
+# to documents actually in this corpus; see graph/formulation.py's
+# CATEGORY_STATUTORY_TAGS for how a query's formulation category maps to
+# these same tag names, and idea.md for which tags (WIPO GRATK, Nagoya,
+# Budapest) have no source document indexed yet and so can never actually
+# fire — they're reserved names, not implemented coverage.
+_STATUTORY_TAG_RULES: list[tuple[str, "re.Pattern", str]] = []
+
+
+def _compile_statutory_tag_rules():
+    rules = [
+        ("Patents_Act", r"\b3\s*\(\s*p\s*\)|section\s+3\s*\(\s*p\s*\)", "Patents_Act_Sec3p"),
+        ("Patent_Office_Manual", r"\b3\s*\(\s*p\s*\)|traditional knowledge", "Patents_Act_Sec3p"),
+        ("Patents_Act", r"\b3\s*\(\s*e\s*\)|section\s+3\s*\(\s*e\s*\)", "Patents_Act_Sec3e"),
+        ("", r"\btkdl\b|traditional knowledge digital library", "TKDL"),
+        ("Drugs_and_Cosmetics", r"first schedule", "D&C_First_Schedule"),
+        ("Drugs_and_Cosmetics", r"phytopharmaceutical", "D&C_Phytopharmaceutical_Definition"),
+        ("Drugs_and_Cosmetics", r"\bcosmetic", "D&C_Cosmetic_Rules"),
+        ("Biological_Diversity_Act", r"\bexempt", "BDA_Exemption"),
+        ("Biological_Diversity_Act", r"national biodiversity authority|\bform\s+i\b|\bform\s+ii\b|section\s+6\b", "BDA_Section6_NBA_Form1_Form2"),
+        ("Ayurveda_Aahara", r".", "FSSAI_Ayurveda_Aahar_Regs_2022"),  # whole document is this regulation
+        ("", r"therapeutic claim", "No_Therapeutic_Claim"),
+        ("", r"clinical trial|clinical validation|clinical stud(y|ies)", "Clinical_Validation"),
+    ]
+    return [(src, re.compile(pat, re.IGNORECASE), tag) for src, pat, tag in rules]
+
+
+def tag_statutory_metadata(source_file: str, text: str) -> list[str]:
+    """
+    Best-effort statutory tagging by keyword/filename matching — NOT
+    authoritative legal categorization. A domain expert should review these
+    before relying on them for a compliance decision; this exists so
+    formulation-category context (see graph/formulation.py) has *something*
+    concrete to point at in the prompt, not to replace legal review.
+
+    Deliberately keyword/filename-based rather than a learned classifier or
+    LLM call, for the same determinism reason as graph/formulation.py's
+    query-side classifier: this runs once at ingestion time per chunk, and
+    needs to produce the same tags on every re-ingestion of the same PDF.
+    """
+    global _STATUTORY_TAG_RULES
+    if not _STATUTORY_TAG_RULES:
+        _STATUTORY_TAG_RULES = _compile_statutory_tag_rules()
+
+    tags = []
+    for source_substring, pattern, tag in _STATUTORY_TAG_RULES:
+        if source_substring and source_substring not in source_file:
+            continue
+        if pattern.search(text):
+            tags.append(tag)
+    return sorted(set(tags))
 
 
 def detect_heading(text: str) -> str:
@@ -169,6 +227,7 @@ def chunk_pages(
                     section_heading=heading or "Unlabelled section",
                     text=piece,
                     jurisdiction=page.jurisdiction,
+                    statutory_tags=tag_statutory_metadata(source, piece),
                 )
             )
 

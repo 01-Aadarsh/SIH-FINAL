@@ -7,6 +7,21 @@ forward pass, which is more accurate for real relevance. This is the last
 filter before chunks reach the LLM, so it decides what the model is even
 allowed to answer from.
 
+Score calibration: ms-marco-MiniLM outputs raw, unbounded logits (observed
+range roughly -11 to +7 on this corpus — see the empirical spread below),
+not a probability. rerank_score is now sigmoid(raw_logit), a 0-1 confidence
+score comparable across queries, which raw logits are not (a "-3.5" means
+something different depending on how spread out that particular query's
+candidate scores happen to be). Empirical spread, five real queries against
+the live corpus, top-3 each: on-topic queries the corpus genuinely covers
+(traditional knowledge / Section 3(p), geographical indications) scored
+sigmoid 0.92-0.999; queries with no real answer in this corpus (capital of
+France, baking a cake) scored sigmoid ~0.000. RERANK_SCORE_THRESHOLD = 0.15
+sits well above the "clearly nothing here" cluster and well below the
+"clearly answered" cluster — calibrated against that small, real spread,
+not against a rigorous labeled precision/recall study across the full
+corpus, which this doesn't claim to be.
+
 Usage:
     python -m retrieval.reranker "Section 3(p) traditional knowledge"
 """
@@ -15,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import sys
 
@@ -42,24 +58,35 @@ def _get_model() -> CrossEncoder:
     return _model
 
 
+def _sigmoid(x: float) -> float:
+    return 1.0 / (1.0 + math.exp(-x))
+
+
 def rerank(query: str, candidates: list[dict], top_k: int = 5) -> list[dict]:
     """Score each (query, chunk_text) pair with the cross-encoder, keep top_k.
 
-    Metadata on each candidate is passed through untouched; only the score
-    and rank fields are added/overwritten.
+    rerank_score is the calibrated sigmoid(raw_logit) — see module
+    docstring. raw_logit is kept alongside it (uncalibrated, for debugging/
+    diagnostics only; nothing downstream should threshold on it directly).
+    Metadata on each candidate is passed through untouched otherwise.
     """
     if not candidates:
         return []
 
     model = _get_model()
     pairs = [(query, candidate["text"]) for candidate in candidates]
-    scores = model.predict(pairs)
+    raw_scores = model.predict(pairs)
 
-    reranked = sorted(zip(candidates, scores), key=lambda pair: pair[1], reverse=True)[:top_k]
+    reranked = sorted(zip(candidates, raw_scores), key=lambda pair: pair[1], reverse=True)[:top_k]
 
     return [
-        {**candidate, "rerank_score": float(score), "rank": rank}
-        for rank, (candidate, score) in enumerate(reranked, start=1)
+        {
+            **candidate,
+            "rerank_score": _sigmoid(float(raw_score)),
+            "raw_logit": float(raw_score),
+            "rank": rank,
+        }
+        for rank, (candidate, raw_score) in enumerate(reranked, start=1)
     ]
 
 

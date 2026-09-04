@@ -35,7 +35,7 @@ def _print_stage(title: str, results: list[dict], limit: int = 5) -> None:
 async def run(query: str, jurisdiction: str = "india") -> None:
     print(f"\nQuery: {query!r}  (jurisdiction={jurisdiction})")
 
-    bm25_results = bm25_search(query, top_k=20)
+    bm25_results = bm25_search(query, top_k=20, jurisdiction=jurisdiction)
     _print_stage("BM25 top 5", bm25_results)
 
     dense_results = await dense_search(query, top_k=20, jurisdiction=jurisdiction)

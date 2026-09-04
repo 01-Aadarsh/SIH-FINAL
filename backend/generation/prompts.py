@@ -53,11 +53,37 @@ rule 2 (or rule 4, when it applies) requires.
 """
 
 
-def build_user_prompt(query: str, chunks: list[dict]) -> str:
-    """Assemble the context block + question the model actually sees."""
+def build_user_prompt(
+    query: str,
+    chunks: list[dict],
+    formulation_category: str | None = None,
+    statutory_tags: list[str] | None = None,
+) -> str:
+    """Assemble the context block + question the model actually sees.
+
+    formulation_category/statutory_tags (see graph/formulation.py) are
+    advisory framing, not a hard constraint — they tell the model which
+    regulatory lens the question likely falls under, so an answer about a
+    proprietary Ayurvedic medicine doesn't accidentally read as though it
+    applies to classical formulations or vice versa. They do not override
+    rule 1 (answer only from the Context below): a heuristic category
+    label is not itself something to cite or treat as ground truth.
+    """
     if not chunks:
         context = "(no context was retrieved for this query)"
     else:
         context = "\n\n---\n\n".join(chunk["text"] for chunk in chunks)
 
-    return f"Context:\n{context}\n\nQuestion: {query}"
+    framing = ""
+    if formulation_category:
+        tags = ", ".join(statutory_tags or [])
+        framing = (
+            f"Likely regulatory category (heuristic, not confirmed by the user): "
+            f"{formulation_category}. Statutory areas typically relevant to this "
+            f"category: {tags}. Use this only to frame which regulatory angle the "
+            f"question is probably about — never state it as a fact about the "
+            f"user's specific product, and never let it substitute for what the "
+            f"Context below actually says.\n\n"
+        )
+
+    return f"{framing}Context:\n{context}\n\nQuestion: {query}"

@@ -212,12 +212,24 @@ def complete(user_prompt: str, system_prompt: str | None = None) -> str:
     return asyncio.run(acomplete(user_prompt, system_prompt=system_prompt))
 
 
-async def agenerate(query: str, chunks: list[dict]) -> str:
-    return await acomplete(build_user_prompt(query, chunks), system_prompt=SYSTEM_PROMPT)
+async def agenerate(
+    query: str,
+    chunks: list[dict],
+    formulation_category: str | None = None,
+    statutory_tags: list[str] | None = None,
+) -> str:
+    prompt = build_user_prompt(query, chunks, formulation_category, statutory_tags)
+    return await acomplete(prompt, system_prompt=SYSTEM_PROMPT)
 
 
-async def astream_generate(query: str, chunks: list[dict]) -> AsyncIterator[str]:
-    async for token in astream_complete(build_user_prompt(query, chunks), system_prompt=SYSTEM_PROMPT):
+async def astream_generate(
+    query: str,
+    chunks: list[dict],
+    formulation_category: str | None = None,
+    statutory_tags: list[str] | None = None,
+) -> AsyncIterator[str]:
+    prompt = build_user_prompt(query, chunks, formulation_category, statutory_tags)
+    async for token in astream_complete(prompt, system_prompt=SYSTEM_PROMPT):
         yield token
 
 

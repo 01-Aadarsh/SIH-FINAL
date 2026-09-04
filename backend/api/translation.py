@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 
 import httpx
@@ -68,6 +69,61 @@ TARGET_LANGUAGE_CODES: tuple[str, ...] = (
     "mai-IN", "mni-IN", "ne-IN", "sa-IN", "sat-IN", "sd-IN", "ur-IN",
 )
 SOURCE_LANGUAGE_CODES: tuple[str, ...] = ("auto", *TARGET_LANGUAGE_CODES)
+
+# Ayurvedic technical terms that must survive translation unchanged, not be
+# transliterated into an approximate English gloss (e.g. Bhasma -> "ash",
+# which loses the specific pharmaceutical meaning the corpus's Drugs &
+# Cosmetics Act text actually uses). Maps every recognized surface form —
+# common Latin-script spelling variants and Devanagari — to one canonical
+# English term. Not exhaustive; the six terms named in the request plus
+# Arishta (near-synonym of Asava, common enough alongside it to be worth
+# including) and their most common alternate spellings.
+PROTECTED_AYURVEDIC_TERMS: dict[str, str] = {
+    "churna": "Churna", "churn": "Churna", "chura": "Churna", "चूर्ण": "Churna",
+    "bhasma": "Bhasma", "bhasm": "Bhasma", "भस्म": "Bhasma",
+    "taila": "Taila", "tail": "Taila", "तैल": "Taila", "तेल": "Taila",
+    "kwath": "Kwatha", "kwatha": "Kwatha", "kashaya": "Kwatha", "काढा": "Kwatha", "क्वाथ": "Kwatha",
+    "rasa shastra": "Rasa Shastra", "rasashastra": "Rasa Shastra",
+    "रस शास्त्र": "Rasa Shastra", "रसशास्त्र": "Rasa Shastra",
+    "asava": "Asava", "आसव": "Asava",
+    "arishta": "Arishta", "अरिष्ट": "Arishta",
+}
+
+_PROTECT_PLACEHOLDER = "XPROTECTEDTERMX{index}X"
+
+
+def _protect_terms(text: str) -> tuple[str, dict[str, str]]:
+    """Swap every recognized Ayurvedic term for an opaque, translation-model-
+    safe placeholder token, so Sarvam never actually sees the term and can't
+    mistranslate or transliterate it. Longest terms first, so a multi-word
+    entry (e.g. "rasa shastra") matches before its component single words
+    could claim part of it. Returns the modified text and a placeholder ->
+    canonical-term mapping for _restore_terms() to reverse afterward.
+    """
+    terms_longest_first = sorted(PROTECTED_AYURVEDIC_TERMS, key=len, reverse=True)
+    mapping: dict[str, str] = {}
+    counter = [0]
+
+    for term in terms_longest_first:
+        canonical = PROTECTED_AYURVEDIC_TERMS[term]
+        pattern = re.compile(re.escape(term), re.IGNORECASE)
+
+        def _replace(match: re.Match, canonical: str = canonical) -> str:
+            placeholder = _PROTECT_PLACEHOLDER.format(index=counter[0])
+            counter[0] += 1
+            mapping[placeholder] = canonical
+            return placeholder
+
+        text = pattern.sub(_replace, text)
+
+    return text, mapping
+
+
+def _restore_terms(text: str, mapping: dict[str, str]) -> str:
+    for placeholder, canonical in mapping.items():
+        text = text.replace(placeholder, canonical)
+    return text
+
 
 _client: httpx.AsyncClient | None = None
 
@@ -137,13 +193,14 @@ async def translate_text(text: str, source_lang: str, target_lang: str) -> str:
         log.warning("SARVAM_API_KEY is not set — returning text untranslated")
         return text
 
-    chunks = split_text(text, SARVAM_MAX_CHARS)
+    protected_text, term_mapping = _protect_terms(text)
+    chunks = split_text(protected_text, SARVAM_MAX_CHARS)
     try:
         client = _get_client()
         translated_chunks = await asyncio.gather(
             *(_translate_chunk(client, chunk, source_lang, target_lang) for chunk in chunks)
         )
-        return " ".join(translated_chunks)
+        return _restore_terms(" ".join(translated_chunks), term_mapping)
     except Exception as exc:
         log.warning(
             "Translation failed (%s -> %s, %d chunk(s)): %s — returning original text",

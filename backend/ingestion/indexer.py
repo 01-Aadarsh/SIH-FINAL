@@ -20,6 +20,7 @@ import asyncio
 import logging
 import os
 import pickle
+import re
 import sys
 from pathlib import Path
 
@@ -77,6 +78,13 @@ CREATE TABLE IF NOT EXISTS chunks (
 -- law) instead of forcing a full re-embed via --reset.
 ALTER TABLE chunks ADD COLUMN IF NOT EXISTS jurisdiction TEXT NOT NULL DEFAULT 'india';
 
+-- Best-effort keyword tagging (ingestion/chunker.py::tag_statutory_metadata),
+-- not authoritative legal categorization. Not used as a hard retrieval
+-- filter (a missed heuristic match would silently hide a real answer) —
+-- carried through to the API/prompt as advisory context only. Empty array
+-- default, not NULL, so callers never need a NULL check.
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS statutory_tags TEXT[] NOT NULL DEFAULT '{{}}';
+
 -- Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, so this re-runs on every
 -- ensure_schema() call and must not error the 2nd+ time — catch the
 -- duplicate_object error instead of pre-checking pg_constraint, since that
@@ -97,13 +105,75 @@ CREATE INDEX IF NOT EXISTS chunks_jurisdiction_idx ON chunks (jurisdiction);
 """
 
 
+# IPR/AYUSH domain synonym pairs. Each entry: (pattern matching one surface
+# form, canonical alias phrase for the OTHER form). tokenize() appends the
+# alias whenever the pattern matches, so both surface forms end up sharing
+# tokens in the same document/query — this is additive (original wording
+# stays searchable too), not a replacement, and runs once over the
+# original text (no re-scanning of appended output, so no expansion loops).
+#
+# Added after a real, reproduced failure: "What is a trademark?" (one word)
+# scored the actual Trade Marks Act far below unrelated chunks, because the
+# Act's own text says "trade marks" (two words, its literal title) and BM25
+# is exact-token matching — "trademark" and "trade"+"marks" share zero
+# tokens. Confirmed by running the query through bm25_search.py directly:
+# Trade_Marks_Act_1999 didn't appear in the BM25 top 5 at all despite being
+# the single most relevant document in the corpus for that question.
+DOMAIN_SYNONYMS: list[tuple] = []
+
+
+def _compile_domain_synonyms():
+    pairs = [
+        (r"\btrade[\s-]*marks?\b", "trademark"),
+        (r"\btrademarks?\b", "trade mark"),
+        (r"\bipr\b", "intellectual property rights"),
+        (r"\bintellectual property rights?\b", "ipr"),
+        (r"\bp\s*(?:&|and)\s*p\b", "patent or proprietary medicine"),
+        (r"\bpatent\s+or\s+proprietary\s+medicine[s]?\b", "p and p"),
+        (r"\btk\b", "traditional knowledge"),
+        (r"\btraditional knowledge\b", "tk"),
+        (r"\bbd\s+act\b", "biological diversity act"),
+        (r"\bbiological diversity act\b", "bd act"),
+        (r"\bbda\b", "biological diversity act"),
+        (r"\bnba\b", "national biodiversity authority"),
+        (r"\bnational biodiversity authority\b", "nba"),
+        (r"\btkdl\b", "traditional knowledge digital library"),
+        (r"\bd\s*&\s*c\s+act\b", "drugs and cosmetics act"),
+        (r"\bfssai\b", "food safety and standards authority of india"),
+        (r"\bgi\b", "geographical indication"),
+        (r"\bgeographical indications?\b", "gi"),
+    ]
+    return [(re.compile(p, re.IGNORECASE), alias) for p, alias in pairs]
+
+
+DOMAIN_SYNONYMS = _compile_domain_synonyms()
+
+
+def _augment_domain_synonyms(text: str) -> str:
+    """Append canonical aliases for any recognized domain term variant found
+    in `text`, so BM25 sees matching tokens regardless of which surface form
+    (acronym vs. spelled-out, one-word vs. two-word) the document or the
+    query happens to use. See DOMAIN_SYNONYMS above for the real bug this
+    fixes and how it was found."""
+    if not DOMAIN_SYNONYMS:
+        return text
+    extras = [alias for pattern, alias in DOMAIN_SYNONYMS if pattern.search(text)]
+    return text if not extras else text + " " + " ".join(extras)
+
+
 def tokenize(text: str) -> list[str]:
     """
-    Lowercase word tokenizer for BM25.
+    Lowercase word tokenizer for BM25, with IPR/AYUSH domain synonym
+    normalization (see DOMAIN_SYNONYMS).
 
     Kept deliberately simple and identical to the one used at query time —
-    if the two ever diverge, BM25 silently stops matching.
+    if the two ever diverge, BM25 silently stops matching. The synonym
+    augmentation runs first, inside this shared function, specifically so
+    it can never diverge either: bm25_search.py imports this exact
+    function, so index-time and query-time normalization are structurally
+    the same code path, not two implementations that could drift apart.
     """
+    text = _augment_domain_synonyms(text)
     return [token for token in "".join(
         char.lower() if char.isalnum() else " " for char in text
     ).split() if token]
@@ -184,6 +254,7 @@ def store_in_pgvector(conn: psycopg.Connection, chunks: list[Chunk], embeddings)
             chunk.section_heading,
             chunk.text,
             chunk.jurisdiction,
+            chunk.statutory_tags,
             embedding,
         )
         for chunk, embedding in zip(chunks, embeddings)
@@ -193,14 +264,15 @@ def store_in_pgvector(conn: psycopg.Connection, chunks: list[Chunk], embeddings)
         cur.executemany(
             """
             INSERT INTO chunks
-                (chunk_id, source_file, page_number, section_heading, text, jurisdiction, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                (chunk_id, source_file, page_number, section_heading, text, jurisdiction, statutory_tags, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (chunk_id) DO UPDATE SET
                 source_file     = EXCLUDED.source_file,
                 page_number     = EXCLUDED.page_number,
                 section_heading = EXCLUDED.section_heading,
                 text            = EXCLUDED.text,
                 jurisdiction    = EXCLUDED.jurisdiction,
+                statutory_tags  = EXCLUDED.statutory_tags,
                 embedding       = EXCLUDED.embedding;
             """,
             rows,
@@ -211,19 +283,46 @@ def store_in_pgvector(conn: psycopg.Connection, chunks: list[Chunk], embeddings)
 
 def build_bm25(chunks: list[Chunk]) -> None:
     """
-    Persist the BM25 index alongside the chunk_ids it was built from.
+    Persist one BM25 index *per jurisdiction*, not one shared index.
+
+    Previously a single BM25Okapi covered the whole corpus regardless of
+    jurisdiction, and an "international" query still searched India-only
+    text — harmless in effect (fusion.py drops the mismatched-jurisdiction
+    results before they reach the LLM) but not actually "filtered during
+    the BM25 pass" the way dense_search's SQL WHERE clause is. Building a
+    separate index per jurisdiction makes BM25 itself jurisdiction-scoped,
+    the same as dense retrieval, instead of relying on a post-filter to
+    catch what BM25 shouldn't have returned in the first place.
 
     The order of chunk_ids must match the order of the corpus passed to
-    BM25Okapi — the search code maps score positions back to ids by index.
+    each BM25Okapi — the search code maps score positions back to ids by
+    index, per jurisdiction's own sub-list.
     """
-    corpus = [tokenize(chunk.text) for chunk in chunks]
-    bm25 = BM25Okapi(corpus)
+    bm25_by_jurisdiction: dict[str, BM25Okapi] = {}
+    chunk_ids_by_jurisdiction: dict[str, list[str]] = {}
+
+    for jurisdiction in JURISDICTIONS:
+        subset = [c for c in chunks if c.jurisdiction == jurisdiction]
+        chunk_ids_by_jurisdiction[jurisdiction] = [c.chunk_id for c in subset]
+        # BM25Okapi errors on an empty corpus (division by zero computing
+        # average document length) — "international" is legitimately empty
+        # right now (see data/international/README.md), so this must be a
+        # real, distinct case, not an incidental crash.
+        bm25_by_jurisdiction[jurisdiction] = BM25Okapi([tokenize(c.text) for c in subset]) if subset else None
 
     BM25_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(BM25_PATH, "wb") as handle:
         pickle.dump(
-            {"bm25": bm25, "chunk_ids": [chunk.chunk_id for chunk in chunks]},
+            {
+                "bm25_by_jurisdiction": bm25_by_jurisdiction,
+                "chunk_ids_by_jurisdiction": chunk_ids_by_jurisdiction,
+            },
             handle,
+        )
+    for jurisdiction in JURISDICTIONS:
+        log.info(
+            "BM25 index for jurisdiction=%s: %d chunks",
+            jurisdiction, len(chunk_ids_by_jurisdiction[jurisdiction]),
         )
     log.info("BM25 index written to %s", BM25_PATH)
 
