@@ -49,7 +49,13 @@ OVERLAP_CHARS = 200
 # pre-filter (also raised, see below) is.
 HEADING_PATTERNS = [
     re.compile(
-        r"^(Section|Rule|Chapter|Clause|Part|Schedule)\s+[\dIVXLC]+"
+        # "Article" added for treaty text (e.g. data/international/
+        # WIPO_GRATK_Treaty_2024.pdf's "ARTICLE 3" headers) — international
+        # instruments use this instead of "Section"/"Rule", and none of
+        # this project's Indian-Act documents happen to contain the literal
+        # word "Article" as a heading word, so this is a safe addition, not
+        # a pattern that risks matching something it shouldn't.
+        r"^(Section|Rule|Chapter|Clause|Part|Schedule|Article)\s+[\dIVXLC]+"
         r"(\([\w\-]+\))*(\s*[:.\-–—]\s*[A-Z].{0,90})?$",
         re.I,
     ),
@@ -126,8 +132,90 @@ def _compile_statutory_tag_rules():
         ("Biological_Diversity_Act", r"national biodiversity authority|\bform\s+i\b|\bform\s+ii\b|section\s+6\b", "BDA_Sec6_NBA_Approval"),
         ("Ayurveda_Aahara", r".", "FSSAI_Ayurveda_Aahar_2022"),  # whole document is this regulation
         ("NDCT_Rules", r".", "NDCT_Rules_2019"),  # whole document is this regulation
+
+        # data/BD_Amendment_Act_2023.pdf — Biological Diversity (Amendment)
+        # Act, 2023 (Act No. 10 of 2023), downloaded from the official India
+        # e-Gazette (egazette.gov.in/WritereadData/2023/247815.pdf) and
+        # verified page-by-page to be genuine extractable text, not
+        # reconstructed from memory. Deliberately a distinct document/tag
+        # set from Biological_Diversity_Act's own BDA_Sec6_NBA_Approval /
+        # BDA_Sec7_SBB_Exemption above — this Act only contains the 2023
+        # amendments TO those sections, not the sections themselves, so
+        # conflating the tags would misrepresent which document a citation
+        # actually came from.
+        ("BD_Amendment_Act_2023", r".", "BDA_2023"),  # whole document is this amendment act
+        (
+            "BD_Amendment_Act_2023",
+            r"national biodiversity authority.{0,80}(prior approval|intellectual property)|section\s+6\b",
+            "NBA_Section6",
+        ),
+        (
+            "BD_Amendment_Act_2023",
+            r"vaids?,?\s*hakims?|registered ayush practitioners?|codified traditional knowledge",
+            "AYUSH_Section7_Exemption",
+        ),
+        (
+            "BD_Amendment_Act_2023",
+            r"prior intimation.{0,60}(state biodiversity board|union territory biodiversity council)",
+            "SBB_Intimation",
+        ),
+
+        # data/BD_Rules_2024.pdf — the Biological Diversity Rules, 2024
+        # (G.S.R. 665(E), 22 October 2024), downloaded from the WIPO Lex
+        # mirror of the official Gazette notification, English portion only
+        # (pages 50-86 of the bilingual original; the Hindi first half was
+        # dropped rather than indexed as noise no English query could ever
+        # usefully match — see the ingestion note this was verified with).
+        # "ABS_Formula" is Rule 21(4)'s real benefit-sharing earmark range
+        # (10-15% to the Authority/Board, rest to benefit claimers) — the
+        # 2024 Rules do not contain a fixed royalty-on-sales percentage
+        # formula the way the older 2014 ABS Guidelines did; this tag
+        # points at what the 2024 Rules actually say, not an invented one.
+        # "NBA_Form_1" also covers Form 2 — Rule 13(1) creates both in the
+        # same breath (Form 1: research/bio-survey access, Form 2:
+        # commercial-utilisation access), so a query matching either is
+        # genuinely about this same provision. There is deliberately no
+        # "SBB_Form_B" tag: verified against the actual Rules text that no
+        # nationally standardized "Form B" exists — Section 24(1) of the
+        # amended Act (see BD_Amendment_Act_2023 above) leaves the
+        # Section 7 SBB-intimation form to be "prescribed by the State
+        # Government", i.e. it is state-specific, not a central NBA form.
+        ("BD_Rules_2024", r".", "BDA_Rules_2024"),  # whole document is this regulation
+        (
+            "BD_Rules_2024",
+            r"ten percent to maximum of fifteen percent|benefit sharing.{0,60}earmarked",
+            "ABS_Formula",
+        ),
+        (
+            "BD_Rules_2024",
+            r"\bform\s*[-]?\s*1\b|\bform\s*[-]?\s*2\b|web portal of the authority in form",
+            "NBA_Form_1",
+        ),
+        (
+            "BD_Rules_2024",
+            r"prescribed by the state government|state biodiversity board or union territory biodiversity council",
+            "SBB_State_Prescribed_Form",
+        ),
+
         ("", r"therapeutic claim", "No_Therapeutic_Claim"),
         ("", r"clinical trial|clinical validation|clinical stud(y|ies)", "Clinical_Validation"),
+
+        # data/international/WIPO_GRATK_Treaty_2024.pdf — WIPO Treaty on
+        # Intellectual Property, Genetic Resources and Associated
+        # Traditional Knowledge, adopted at Geneva, May 24, 2024.
+        # Downloaded from WIPO's own treaty-text mirror
+        # (wipolex-res.wipo.int/edocs/lexdocs/treaties/en/gratk/
+        # trt_gratk_001en.pdf) and verified page-by-page to be genuine
+        # extractable treaty text, not reconstructed from memory — the
+        # same standard applied to every other document in this corpus.
+        ("WIPO_GRATK", r".", "WIPO_GRATK_2024"),  # whole document is this treaty
+        (
+            "WIPO_GRATK",
+            r"disclose.{0,80}(country of origin|source of the genetic resources|indigenous peoples? or local community)",
+            "Mandatory_Patent_Disclosure",
+        ),
+        ("WIPO_GRATK", r"genetic resources?", "Genetic_Resources"),
+        ("WIPO_GRATK", r"traditional knowledge", "Traditional_Knowledge"),
     ]
     return [(src, re.compile(pat, re.IGNORECASE), tag) for src, pat, tag in rules]
 
@@ -248,6 +336,77 @@ _LETTER_GAP_TOLERANCE = 5
 # chunking strategy.
 MIN_SECTIONS_TO_TRUST_HIERARCHICAL_PARSE = 3
 
+# The real, consistent title-page convention across every Act/Rules PDF in
+# this corpus — "THE TRADE MARKS ACT, 1999", "THE NEW DRUGS AND CLINICAL
+# TRIALS RULES, 2019", "THE BIOLOGICAL DIVERSITY ACT, 2002" — verified
+# directly against extracted text from four different documents before
+# relying on it (see the chunker.py verification script this was built
+# with). Kept verbatim (not re-cased) when matched: title-casing an
+# all-caps legal title risks mangling acronyms it might contain, and the
+# verbatim string is itself real, sourced text, not a guess.
+STATUTE_TITLE_PATTERN = re.compile(r"^THE\s+.{5,100},\s*\d{4}\.?$")
+
+
+def _detect_statute_name(pages: list[Page]) -> str:
+    """Scan the first couple of pages (title page + arrangement-of-sections
+    page, both present before any real body text) for the document's own
+    self-declared title. Falls back to a filename-derived name — still real
+    content, just less precise — for the handful of documents (gazette
+    notifications, factsheets) that don't open with this exact convention;
+    those never reach HierarchicalStatutoryChunker anyway (see
+    MIN_SECTIONS_TO_TRUST_HIERARCHICAL_PARSE), but the fallback keeps this
+    function total rather than raising on an unexpected document shape.
+    """
+    for page in pages[:2]:
+        for line in (page.raw_text or page.text or "").split("\n"):
+            stripped = line.strip()
+            if STATUTE_TITLE_PATTERN.match(stripped):
+                return stripped.rstrip(".")
+    stem = pages[0].source_file.rsplit(".", 1)[0] if pages else "Unknown"
+    return stem.replace("_", " ")
+
+
+# "CHAPTER I", "CHAPTER IVA" (Indian Acts insert new chapters with a
+# trailing letter rather than renumbering, e.g. Trade_Marks_Act_1999's
+# CHAPTER IVA on international registration under the Madrid Protocol,
+# inserted after the original CHAPTER IV) — verified against real extracted
+# text, not a guessed convention.
+CHAPTER_HEADER_PATTERN = re.compile(r"^CHAPTER\s+([IVXLC]+[A-Z]?)\s*$")
+
+# A section-defining clause carries this in its context header when its
+# parent section's own title says so ("2. Definitions and interpretation.",
+# "2. Definitions."). Deliberately keyed off the section title, not the
+# section number — definitions sections aren't always numbered "2" across
+# every Act in this corpus, so hardcoding that number would silently miss
+# documents where it isn't.
+_DEFINITION_SECTION_TITLE = re.compile(r"\bdefinition", re.I)
+
+# The standard Indian legislative-drafting marker for a proviso — text that
+# qualifies or carves an exception into the clause before it, rather than
+# stating a new rule of its own. Checked against the clause's own text, not
+# its label, since provisos are drafting convention (a sentence starting
+# "Provided that...") rather than a separately lettered clause.
+_PROVISO_PREFIX = re.compile(r"^\s*provided\s+(that|further)\b", re.I)
+
+
+def _classify_clause(section_title: str, clause_text: str) -> str:
+    """Best-effort classification for the context header's [Classification:
+    ...] line — not a legal determination, the same caveat as
+    tag_statutory_metadata() above. "Schedule" isn't reachable from here:
+    Schedules (First Schedule, Second Schedule, ...) don't follow the "N.
+    Title.—body" numbered-section format SECTION_HEADER_PATTERN requires,
+    so they're never fed through this classifier in the first place — they
+    fall through to the plain sliding-window chunker instead, which doesn't
+    build this header at all. Left as "Operative Provision" (the honest
+    default) rather than inventing a Schedule detection heuristic this
+    parser has no real structural basis for.
+    """
+    if _PROVISO_PREFIX.match(clause_text):
+        return "Proviso"
+    if _DEFINITION_SECTION_TITLE.search(section_title):
+        return "Statutory Definition"
+    return "Operative Provision"
+
 
 class HierarchicalStatutoryChunker:
     """
@@ -284,9 +443,10 @@ class HierarchicalStatutoryChunker:
     see chunk_pages().
     """
 
-    def __init__(self, source_file: str, jurisdiction: str, size: int = CHUNK_CHARS):
+    def __init__(self, source_file: str, jurisdiction: str, statute_name: str, size: int = CHUNK_CHARS):
         self.source_file = source_file
         self.jurisdiction = jurisdiction
+        self.statute_name = statute_name
         self.size = size
         self.section_number: str | None = None
         self.section_title: str = ""
@@ -295,13 +455,26 @@ class HierarchicalStatutoryChunker:
         self.current_page = 0
         self._letter_index = 0
         self._numeric_index = 1
-        # (section_heading, clause_label, text, page_number) — page_number is
-        # the page the clause was FLUSHED on, i.e. where it ends. A clause
-        # that starts on one page and continues onto the next is attributed
-        # to the later page; approximate for a multi-page clause, but a
-        # defensible citation (that's the page a reader needs to see the
-        # clause in full) rather than an arbitrary choice.
-        self.records: list[tuple[str, str, str, int]] = []
+        # Chapter tracking is independent of the section/clause sequence
+        # reset above — a chapter spans many sections, so it's only ever
+        # updated when a new CHAPTER header line is actually seen, not on
+        # every section boundary.
+        self.chapter_number: str = ""
+        self.chapter_title: str = ""
+        self._awaiting_chapter_title = False
+        # (section_heading, clause_label, text, page_number, context_header)
+        # — page_number is the page the clause was FLUSHED on, i.e. where it
+        # ends. A clause that starts on one page and continues onto the next
+        # is attributed to the later page; approximate for a multi-page
+        # clause, but a defensible citation (that's the page a reader needs
+        # to see the clause in full) rather than an arbitrary choice.
+        # context_header is the "[Statute: ...]\n[Chapter: ...]\n[Section:
+        # ...]\n[Classification: ...]" block prepended to the indexed text
+        # (see _chunk_statutory_document) — built here, at flush time,
+        # because this is the one place that already has every piece of
+        # state (statute_name, chapter, section, and the clause text needed
+        # for _classify_clause) in scope at once.
+        self.records: list[tuple[str, str, str, int, str]] = []
 
     def _reset_sequence(self) -> None:
         self._letter_index = 0
@@ -334,13 +507,52 @@ class HierarchicalStatutoryChunker:
             heading = f"Section {self.section_number}. {self.section_title}".strip()
             if self.clause_label:
                 heading = f"{heading}, clause ({self.clause_label})"
-            self.records.append((heading, self.clause_label or "", text, self.current_page))
+
+            header_lines = [f"[Statute: {self.statute_name}]"]
+            if self.chapter_number:
+                chapter_line = self.chapter_number
+                if self.chapter_title:
+                    chapter_line = f"{chapter_line} - {self.chapter_title}"
+                header_lines.append(f"[Chapter: {chapter_line}]")
+            header_lines.append(f"[Section: {self.section_number} - {self.section_title}]")
+            header_lines.append(f"[Classification: {_classify_clause(self.section_title, text)}]")
+            context_header = "\n".join(header_lines)
+
+            self.records.append((heading, self.clause_label or "", text, self.current_page, context_header))
         self.clause_lines = []
 
     def feed_page(self, page_number: int, raw_text: str) -> None:
         self.current_page = page_number
         for line in (raw_text or "").split("\n"):
-            section_match = SECTION_HEADER_PATTERN.match(line.strip())
+            stripped_line = line.strip()
+
+            chapter_match = CHAPTER_HEADER_PATTERN.match(stripped_line)
+            if chapter_match:
+                self.chapter_number = chapter_match.group(1)
+                self.chapter_title = ""
+                self._awaiting_chapter_title = True
+                continue
+
+            if self._awaiting_chapter_title:
+                self._awaiting_chapter_title = False
+                # isupper() is true only when there's at least one cased
+                # character and every cased character is uppercase — real
+                # section/clause body lines (lowercase words, digits,
+                # punctuation) never satisfy this, so this can't
+                # accidentally swallow actual content as a fake title.
+                # "SECTIONS" is excluded by name: it's the literal marker
+                # line these Acts print between a chapter's title and its
+                # arrangement-of-sections list, verified against real
+                # extracted text, not itself ever a chapter title.
+                if stripped_line and stripped_line.isupper() and stripped_line != "SECTIONS":
+                    self.chapter_title = stripped_line
+                    continue
+                # Not a title line — fall through so it's still processed
+                # as a normal line below (it might be the first real
+                # section header, e.g. immediately after a one-line-title
+                # chapter with no separate TOC banner).
+
+            section_match = SECTION_HEADER_PATTERN.match(stripped_line)
             if section_match:
                 self._flush_clause()
                 self.current_page = page_number
@@ -362,16 +574,16 @@ class HierarchicalStatutoryChunker:
                 # section — not this chunker's concern, see chunk_pages().
                 continue
 
-            clause_match = CLAUSE_PATTERN.match(line.strip())
+            clause_match = CLAUSE_PATTERN.match(stripped_line)
             if clause_match and self._accept_as_top_level(clause_match.group(1)):
                 self._flush_clause()
                 self.current_page = page_number
                 self.clause_label = clause_match.group(1)
-                self.clause_lines = [line.strip()[clause_match.end():]]
+                self.clause_lines = [stripped_line[clause_match.end():]]
             else:
                 self.clause_lines.append(line)
 
-    def finish(self) -> list[tuple[str, str, str, int]]:
+    def finish(self) -> list[tuple[str, str, str, int, str]]:
         self._flush_clause()
         return self.records
 
@@ -390,31 +602,44 @@ def _chunk_statutory_document(pages: list[Page]) -> list[Chunk] | None:
 
     source = pages[0].source_file
     jurisdiction = pages[0].jurisdiction
-    parser = HierarchicalStatutoryChunker(source, jurisdiction)
+    statute_name = _detect_statute_name(pages)
+    parser = HierarchicalStatutoryChunker(source, jurisdiction, statute_name)
 
     for page in pages:
         parser.feed_page(page.page_number, page.raw_text or page.text)
 
     records = parser.finish()
-    distinct_sections = len({heading.split(",")[0] for heading, _, _, _ in records})
+    distinct_sections = len({heading.split(",")[0] for heading, _, _, _, _ in records})
     if distinct_sections < MIN_SECTIONS_TO_TRUST_HIERARCHICAL_PARSE:
         return None
 
     chunks: list[Chunk] = []
     counter = 0
-    for heading, clause_label, text, page_number in records:
+    for heading, clause_label, text, page_number, context_header in records:
+        # Tags are computed on the clause's own real text, not the
+        # prepended header — the header's fixed vocabulary ("Statute",
+        # "Chapter", "Classification", ...) shouldn't be able to
+        # accidentally satisfy a statutory_tag_rules body-text pattern that
+        # was written against actual clause content.
+        tags = tag_statutory_metadata(source, text, heading)
         for piece in split_with_overlap(text, CHUNK_CHARS, OVERLAP_CHARS):
             counter += 1
             stem = source.rsplit(".", 1)[0]
+            # The context header goes in front of every piece (not just the
+            # clause's first) so each indexed/embedded piece is
+            # self-describing on its own — retrieval sees pieces
+            # independently, a later overlap-split piece with no header
+            # wouldn't carry its own statute/section/classification signal.
+            indexed_text = f"{context_header}\n\n{piece}"
             chunks.append(
                 Chunk(
                     chunk_id=f"{stem}::p{page_number}::c{counter}",
                     source_file=source,
                     page_number=page_number,
                     section_heading=heading,
-                    text=piece,
+                    text=indexed_text,
                     jurisdiction=jurisdiction,
-                    statutory_tags=tag_statutory_metadata(source, piece, heading),
+                    statutory_tags=tags,
                 )
             )
 

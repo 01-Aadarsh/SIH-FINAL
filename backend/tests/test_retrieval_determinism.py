@@ -271,13 +271,29 @@ async def test_trademark_query_reranked_results_identical_across_runs():
 
 
 @pytest.mark.asyncio
-async def test_international_jurisdiction_bm25_returns_empty_not_error():
-    """BM25 is now partitioned per jurisdiction (see
+async def test_unindexed_jurisdiction_bm25_returns_empty_not_error():
+    """BM25 is partitioned per jurisdiction (see
     ingestion/indexer.py::build_bm25) — querying a jurisdiction with no
     indexed documents must return [], not raise, since BM25Okapi errors on
-    an empty corpus if constructed directly."""
+    an empty corpus if constructed directly.
+
+    Was originally written against jurisdiction="international" itself,
+    back when data/international/ had zero indexed documents — that
+    premise stopped being true once WIPO_GRATK_Treaty_2024.pdf was added
+    (see data/international/README.md and
+    tests/test_statutory_and_regimes.py), so a real "What is the PCT
+    filing route?" query against "international" now legitimately returns
+    BM25 hits, not []. bm25_search.search() itself doesn't validate
+    `jurisdiction` against QueryRequest's india/international enum (that
+    validation is Pydantic's, one layer up in api/main.py) — it just does
+    a dict lookup with an empty-list fallback for any key that isn't
+    present, so a jurisdiction key guaranteed to never have an index is
+    what actually tests the "not raise on an empty corpus" guarantee this
+    test exists for, without depending on which real jurisdictions happen
+    to have documents on a given day.
+    """
     results = await asyncio.to_thread(
-        bm25_search, "What is the PCT filing route?", top_k=10, jurisdiction="international"
+        bm25_search, "What is the PCT filing route?", top_k=10, jurisdiction="no_such_jurisdiction"
     )
     assert results == []
 

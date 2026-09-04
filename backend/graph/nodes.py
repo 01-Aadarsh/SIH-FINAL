@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from generation.citation import attach_citations, is_abstention
+from generation.citation import attach_citations, find_ungrounded_references, is_abstention
 from generation.llm_client import acomplete, agenerate
 from generation.prompts import append_disclaimer
 from graph.formulation import CATEGORY_STATUTORY_TAGS, triage_formulation
@@ -215,6 +215,25 @@ async def generate_answer(state: GraphState) -> dict:
     # checking the raw answer first is the more obviously-correct order and
     # doesn't depend on that being true forever.
     flags["abstained"] = is_abstention(answer)
+
+    # Post-generation grounding check (not run on an abstention: there's no
+    # "Section N"-shaped claim to verify in "I could not find this in my
+    # sources"). Logged, not surfaced in the API response or QueryResponse
+    # — this project's citations are only ever attached from real retrieved
+    # chunks, never parsed out of or edited into the model's own text (see
+    # generation/citation.py's docstring), so an ungrounded reference here
+    # isn't something to silently strip; it's a signal worth a human
+    # looking at the prompt/retrieval for this query, surfaced the same way
+    # weak_grounding's underlying warning already is.
+    if not flags["abstained"]:
+        ungrounded = find_ungrounded_references(answer, state["reranked"])
+        if ungrounded:
+            log.warning(
+                "Answer references %s not found in any retrieved chunk's text — "
+                "possible ungrounded statutory reference. Query: %r",
+                ungrounded, query,
+            )
+
     return {"answer": append_disclaimer(answer), "flags": flags}
 
 

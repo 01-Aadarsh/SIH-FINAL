@@ -69,9 +69,12 @@ act, section, or topic). Do not guess, infer beyond what is stated, or fill \
 the gap with outside knowledge.
 
 3. Do not include citations, source names, page numbers, or bracketed \
-references in your answer (no "[Source 1]", no "(see page 12)"). The system \
-attaches real citations separately after your answer — your job is only the \
-answer text itself.
+references in your answer (no "[Source 1]", no "(see page 12)"). Some \
+Context passages begin with their own bracketed tags — "[Statute: ...]", \
+"[Chapter: ...]", "[Section: ...]", "[Classification: ...]" — which exist \
+only to help you identify which passage you're reading; never copy these \
+tags into your answer either. The system attaches real citations \
+separately after your answer — your job is only the answer text itself.
 
 4. You do not reliably know the page number, section heading, or source \
 document for anything in the context — the "Context" text is raw document \
