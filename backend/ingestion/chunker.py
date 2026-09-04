@@ -67,6 +67,7 @@ class Chunk:
     page_number: int
     section_heading: str
     text: str
+    jurisdiction: str = "india"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -167,6 +168,7 @@ def chunk_pages(
                     page_number=page.page_number,
                     section_heading=heading or "Unlabelled section",
                     text=piece,
+                    jurisdiction=page.jurisdiction,
                 )
             )
 
@@ -193,6 +195,10 @@ def validate_chunks(chunks: list[Chunk]) -> None:
             problems.append(f"{chunk.chunk_id}: empty text")
         if not chunk.chunk_id:
             problems.append("a chunk has an empty chunk_id")
+        if chunk.jurisdiction not in ("india", "international"):
+            problems.append(
+                f"{chunk.chunk_id}: invalid jurisdiction {chunk.jurisdiction!r}"
+            )
 
     ids = [c.chunk_id for c in chunks]
     if len(ids) != len(set(ids)):

@@ -1,6 +1,6 @@
 .env
 .env.local
-data/*.pdf
+data/**/*.pdf
 **/indexes/
 __pycache__/
 *.pyc

@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 from retrieval.bm25_search import search as bm25_search
@@ -31,16 +32,16 @@ def _print_stage(title: str, results: list[dict], limit: int = 5) -> None:
         print(f"  #{r['rank']:>2}  {r[score_key]:.4f}  {r['chunk_id']}  ({source} p{page})")
 
 
-def run(query: str) -> None:
-    print(f"\nQuery: {query!r}")
+async def run(query: str, jurisdiction: str = "india") -> None:
+    print(f"\nQuery: {query!r}  (jurisdiction={jurisdiction})")
 
     bm25_results = bm25_search(query, top_k=20)
     _print_stage("BM25 top 5", bm25_results)
 
-    dense_results = dense_search(query, top_k=20)
+    dense_results = await dense_search(query, top_k=20, jurisdiction=jurisdiction)
     _print_stage("Dense top 5", dense_results)
 
-    fused_results = fuse(bm25_results, dense_results, top_k=20)
+    fused_results = await fuse(bm25_results, dense_results, top_k=20, jurisdiction=jurisdiction)
     _print_stage("Fused (RRF) top 5", fused_results)
 
     reranked_results = rerank(query, fused_results, top_k=5)
@@ -52,4 +53,4 @@ if __name__ == "__main__":
     if not query:
         print('Usage: python -m retrieval "your query"')
         sys.exit(1)
-    run(query)
+    asyncio.run(run(query))

@@ -7,17 +7,20 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from graph.build_graph import build_graph
-from graph.state import DEFAULT_FLAGS
+from graph.state import DEFAULT_FLAGS, DEFAULT_JURISDICTION
 
 
-def run(query: str) -> None:
+async def run(query: str, jurisdiction: str = DEFAULT_JURISDICTION) -> None:
     app = build_graph()
-    result = app.invoke({"query": query, "history": [], "flags": dict(DEFAULT_FLAGS)})
+    result = await app.ainvoke(
+        {"query": query, "history": [], "jurisdiction": jurisdiction, "flags": dict(DEFAULT_FLAGS)}
+    )
 
     print(f"\nQuery: {query!r}\n")
     print("--- Answer ---")
@@ -38,4 +41,4 @@ if __name__ == "__main__":
     if not query:
         print('Usage: python -m graph "your query"')
         sys.exit(1)
-    run(query)
+    asyncio.run(run(query))

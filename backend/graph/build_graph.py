@@ -11,6 +11,11 @@ once — never an unbounded cycle.
                                           |
                           (weak score,    +-> retry_rewrite_query -> retrieve -> rerank -> ...
                            not yet retried)    (flags["retried"]=True forces "generate" next time)
+
+Most nodes are async (they call Groq/Ollama or query pgvector) and this
+compiled graph is driven with .ainvoke(), not .invoke() — see api/main.py.
+should_retry and attach_citations_node stay sync (pure logic, no I/O);
+LangGraph runs sync and async nodes in the same graph without issue.
 """
 
 from __future__ import annotations

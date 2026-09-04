@@ -30,6 +30,11 @@ class Page:
     page_number: int
     text: str
     raw_text: str = ""
+    # "india" or "international" — set by which directory the PDF was found
+    # in (see load_directory), not detected from content. Flows through
+    # Chunk and into the DB's jurisdiction column so retrieval can filter
+    # by it without guessing from text.
+    jurisdiction: str = "india"
 
     def is_usable(self) -> bool:
         """Pages with almost no text are scans or blank separators."""
@@ -59,7 +64,7 @@ def clean_text(raw: str) -> str:
     return "\n\n".join(cleaned)
 
 
-def load_pdf(path: str | Path) -> list[Page]:
+def load_pdf(path: str | Path, jurisdiction: str = "india") -> list[Page]:
     """
     Read one PDF and return its pages.
 
@@ -82,6 +87,7 @@ def load_pdf(path: str | Path) -> list[Page]:
                 # Kept unjoined: headings sit on their own visual line, and
                 # clean_text merges them into the following paragraph.
                 raw_text=raw,
+                jurisdiction=jurisdiction,
             )
 
             if page.is_usable():
@@ -98,24 +104,36 @@ def load_pdf(path: str | Path) -> list[Page]:
 
 
 def load_directory(directory: str | Path = "data") -> list[Page]:
-    """Load every PDF in a directory. Skips files that fail rather than aborting."""
+    """
+    Load every PDF in a directory, tagging jurisdiction by location.
+
+    PDFs directly in `directory` are "india". PDFs under `directory/international/`
+    are "international" — the folder is the source of truth, not filename
+    guessing, so dropping a file in the right place is all ingestion needs.
+    Skips files that fail rather than aborting.
+    """
     directory = Path(directory)
     if not directory.exists():
         raise FileNotFoundError(f"Directory not found: {directory}")
 
-    pdf_paths = sorted(directory.glob("*.pdf"))
-    if not pdf_paths:
+    india_paths = sorted(directory.glob("*.pdf"))
+    international_paths = sorted((directory / "international").glob("*.pdf"))
+    targets = [(p, "india") for p in india_paths] + [
+        (p, "international") for p in international_paths
+    ]
+
+    if not targets:
         log.warning("No PDFs found in %s", directory)
         return []
 
     all_pages: list[Page] = []
-    for pdf_path in pdf_paths:
+    for pdf_path, jurisdiction in targets:
         try:
-            all_pages.extend(load_pdf(pdf_path))
+            all_pages.extend(load_pdf(pdf_path, jurisdiction=jurisdiction))
         except Exception as exc:
             log.error("Failed to load %s: %s", pdf_path.name, exc)
 
-    log.info("Loaded %d pages from %d PDFs", len(all_pages), len(pdf_paths))
+    log.info("Loaded %d pages from %d PDFs", len(all_pages), len(targets))
     return all_pages
 
 

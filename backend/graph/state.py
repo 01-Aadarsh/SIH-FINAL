@@ -14,6 +14,7 @@ from typing import TypedDict
 class GraphState(TypedDict, total=False):
     query: str
     history: list[dict]  # optional prior turns: [{"role": ..., "content": ...}]
+    jurisdiction: str  # "india" or "international" — see ingestion.indexer.JURISDICTIONS
     rewritten_query: str
     candidates: list[dict]  # fused top-20, before reranking
     reranked: list[dict]  # reranked top-5
@@ -28,3 +29,7 @@ class GraphState(TypedDict, total=False):
 # response on the common no-retry path instead of present-and-False. That
 # makes the API response shape inconsistent for callers checking flags["retried"].
 DEFAULT_FLAGS = {"abstained": False, "retried": False}
+
+# Every caller seeding GraphState must set jurisdiction explicitly (see
+# api/main.py) — this is only the fallback for direct/CLI callers that don't.
+DEFAULT_JURISDICTION = "india"

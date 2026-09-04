@@ -11,6 +11,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 # Windows consoles default to cp1252, which can't encode every character a
@@ -19,13 +20,13 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 from generation.citation import attach_citations, is_abstention
-from generation.llm_client import generate
+from generation.llm_client import agenerate
 from retrieval.reranker import search as retrieve
 
 
-def run(query: str) -> None:
-    chunks = retrieve(query, fused_top_k=20, top_k=5)
-    answer = generate(query, chunks)
+async def run(query: str) -> None:
+    chunks = await retrieve(query, fused_top_k=20, top_k=5)
+    answer = await agenerate(query, chunks)
 
     print(f"\nQuery: {query!r}\n")
     print("--- Answer ---")
@@ -48,4 +49,4 @@ if __name__ == "__main__":
     if not query:
         print('Usage: python -m generation "your query"')
         sys.exit(1)
-    run(query)
+    asyncio.run(run(query))

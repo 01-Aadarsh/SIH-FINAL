@@ -5,19 +5,26 @@ Each node takes the running GraphState and returns a dict of only the keys
 it changes — LangGraph merges that into the state. The real logic already
 lives in retrieval/ and generation/; nodes just call into it, they don't
 reimplement it.
+
+Nodes that do I/O (LLM calls, pgvector queries) are async, awaited via
+compiled_graph.ainvoke() in api/main.py — not run_in_threadpool. Nodes that
+are pure CPU-bound logic with no I/O (should_retry, attach_citations_node)
+stay sync; LangGraph runs sync and async nodes side by side in the same
+graph without issue.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from generation.citation import attach_citations, is_abstention
-from generation.llm_client import complete, generate
-from graph.state import GraphState
-from retrieval.bm25_search import search as bm25_search
+from generation.llm_client import acomplete, agenerate
+from graph.state import DEFAULT_FLAGS, DEFAULT_JURISDICTION, GraphState
+from retrieval.bm25_search import search as bm25_search_sync
 from retrieval.dense_search import search as dense_search
 from retrieval.fusion import fuse
-from retrieval.reranker import rerank
+from retrieval.reranker import rerank as rerank_sync
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +39,7 @@ RERANK_TOP_K = 5
 RERANK_SCORE_THRESHOLD = 0.0
 
 
-def rewrite_query(state: GraphState) -> dict:
+async def rewrite_query(state: GraphState) -> dict:
     """Standalone-question rewrite from chat history.
 
     A no-op without history, so a single-turn query passes through
@@ -52,22 +59,31 @@ def rewrite_query(state: GraphState) -> dict:
         "Output only the rewritten question, nothing else.\n\n"
         f"{transcript}\nuser: {query}"
     )
-    rewritten = complete(prompt)
+    rewritten = await acomplete(prompt)
     return {"rewritten_query": rewritten or query}
 
 
-def retrieve(state: GraphState) -> dict:
-    """Hybrid retrieval (BM25 + dense, fused by RRF) on the current query."""
+async def retrieve(state: GraphState) -> dict:
+    """Hybrid retrieval (BM25 + dense, fused by RRF) on the current query,
+    scoped to state["jurisdiction"]. BM25 has no I/O (in-memory index), so
+    it's only offloaded to a thread to avoid blocking the event loop; dense
+    search and the fusion metadata backfill hit pgvector and are natively
+    async all the way down.
+    """
     query = state["rewritten_query"]
-    bm25_results = bm25_search(query, top_k=FUSED_TOP_K)
-    dense_results = dense_search(query, top_k=FUSED_TOP_K)
-    candidates = fuse(bm25_results, dense_results, top_k=FUSED_TOP_K)
+    jurisdiction = state.get("jurisdiction") or DEFAULT_JURISDICTION
+
+    bm25_results = await asyncio.to_thread(bm25_search_sync, query, top_k=FUSED_TOP_K)
+    dense_results = await dense_search(query, top_k=FUSED_TOP_K, jurisdiction=jurisdiction)
+    candidates = await fuse(
+        bm25_results, dense_results, top_k=FUSED_TOP_K, jurisdiction=jurisdiction
+    )
     return {"candidates": candidates}
 
 
-def rerank_node(state: GraphState) -> dict:
+async def rerank_node(state: GraphState) -> dict:
     query = state["rewritten_query"]
-    reranked = rerank(query, state["candidates"], top_k=RERANK_TOP_K)
+    reranked = await asyncio.to_thread(rerank_sync, query, state["candidates"], top_k=RERANK_TOP_K)
     return {"reranked": reranked}
 
 
@@ -94,7 +110,7 @@ def should_retry(state: GraphState) -> str:
     return "generate"
 
 
-def retry_rewrite_query(state: GraphState) -> dict:
+async def retry_rewrite_query(state: GraphState) -> dict:
     """Only reached on the bounded retry path: ask the LLM to rephrase the
     query differently, in case the original phrasing just didn't match the
     corpus well, then mark flags["retried"] so should_retry can't loop again.
@@ -106,16 +122,16 @@ def retry_rewrite_query(state: GraphState) -> dict:
         "Rephrase it as a different, more specific search query that might "
         "match better. Output only the rephrased query, nothing else."
     )
-    rephrased = complete(prompt)
+    rephrased = await acomplete(prompt)
 
     flags = dict(state.get("flags") or {})
     flags["retried"] = True
     return {"rewritten_query": rephrased or original, "flags": flags}
 
 
-def generate_answer(state: GraphState) -> dict:
+async def generate_answer(state: GraphState) -> dict:
     query = state["rewritten_query"]
-    answer = generate(query, state["reranked"])
+    answer = await agenerate(query, state["reranked"])
 
     flags = dict(state.get("flags") or {})
     flags["abstained"] = is_abstention(answer)
@@ -127,3 +143,34 @@ def attach_citations_node(state: GraphState) -> dict:
     if (state.get("flags") or {}).get("abstained"):
         return {"citations": []}
     return {"citations": attach_citations(state["reranked"])}
+
+
+async def run_retrieval_stage(rewritten_query: str, jurisdiction: str) -> tuple[list[dict], bool]:
+    """retrieve -> rerank -> bounded retry, composed from the same node
+    functions the compiled graph uses for this exact sequence (see
+    build_graph.py) — not a reimplementation of the retry threshold logic.
+
+    Exists for api/main.py's SSE streaming endpoint. LangGraph nodes return
+    a full state dict on completion; there's no clean way to have the graph
+    itself yield partial output mid-node, and token streaming only matters
+    for generation, not retrieval. So the streaming endpoint runs this
+    helper directly, then streams generate_answer's underlying call itself,
+    instead of going through compiled_graph.ainvoke() for the whole
+    pipeline. The non-streaming /query endpoint still uses the real
+    compiled graph end to end; this helper's output is identical to what
+    that graph produces up through reranking, by construction.
+    """
+    state: GraphState = {
+        "rewritten_query": rewritten_query,
+        "jurisdiction": jurisdiction,
+        "flags": dict(DEFAULT_FLAGS),
+    }
+    state.update(await retrieve(state))
+    state.update(await rerank_node(state))
+
+    if should_retry(state) == "retry":
+        state.update(await retry_rewrite_query(state))
+        state.update(await retrieve(state))
+        state.update(await rerank_node(state))
+
+    return state["reranked"], state["flags"]["retried"]

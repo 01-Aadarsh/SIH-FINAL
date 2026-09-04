@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -19,7 +20,7 @@ import sys
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
 
-from ingestion.indexer import connect
+from ingestion.indexer import connect_async
 
 load_dotenv()
 
@@ -40,24 +41,35 @@ def _get_model() -> SentenceTransformer:
     return _model
 
 
-def search(query: str, top_k: int = 20) -> list[dict]:
-    """Query -> top_k chunks ranked by cosine similarity, with full metadata attached."""
-    model = _get_model()
-    embedding = model.encode(query, normalize_embeddings=True)
+async def search(query: str, top_k: int = 20, jurisdiction: str = "india") -> list[dict]:
+    """Query -> top_k chunks ranked by cosine similarity, with full metadata attached.
 
-    with connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
+    Filters to a single jurisdiction in SQL (not post-filtered in Python) so
+    an "international" query with an empty corpus for that jurisdiction
+    correctly returns [] instead of silently ranking India-only results.
+    Embedding the query is CPU-bound (no I/O), so it runs off the event loop
+    via asyncio.to_thread; the DB round-trip is genuinely async.
+    """
+    model = _get_model()
+    embedding = await asyncio.to_thread(model.encode, query, normalize_embeddings=True)
+
+    conn = await connect_async()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
                 """
                 SELECT chunk_id, source_file, page_number, section_heading, text,
                        1 - (embedding <=> %s) AS score
                 FROM chunks
+                WHERE jurisdiction = %s
                 ORDER BY embedding <=> %s
                 LIMIT %s;
                 """,
-                (embedding, embedding, top_k),
+                (embedding, jurisdiction, embedding, top_k),
             )
-            rows = cur.fetchall()
+            rows = await cur.fetchall()
+    finally:
+        await conn.close()
 
     return [
         {
@@ -75,7 +87,7 @@ def search(query: str, top_k: int = 20) -> list[dict]:
 
 if __name__ == "__main__":
     query = " ".join(sys.argv[1:]) or "protection for Ayurvedic formulations"
-    results = search(query, top_k=10)
+    results = asyncio.run(search(query, top_k=10))
     print(f"\nDense results for: {query!r}\n")
     if not results:
         print("  (no results)")

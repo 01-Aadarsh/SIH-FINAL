@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
@@ -62,15 +63,22 @@ def rerank(query: str, candidates: list[dict], top_k: int = 5) -> list[dict]:
     ]
 
 
-def search(query: str, fused_top_k: int = 20, top_k: int = 5) -> list[dict]:
-    """Run the full retrieval + rerank pipeline for a single query."""
-    candidates = fused_search(query, top_k=fused_top_k)
-    return rerank(query, candidates, top_k=top_k)
+async def search(
+    query: str, fused_top_k: int = 20, top_k: int = 5, jurisdiction: str = "india"
+) -> list[dict]:
+    """Run the full retrieval + rerank pipeline for a single query.
+
+    rerank() itself is CPU-bound cross-encoder inference, not I/O, so it's
+    only offloaded to a thread here (for callers running inside an event
+    loop); fused_search's own async-ness is about the DB query underneath it.
+    """
+    candidates = await fused_search(query, top_k=fused_top_k, jurisdiction=jurisdiction)
+    return await asyncio.to_thread(rerank, query, candidates, top_k=top_k)
 
 
 if __name__ == "__main__":
     query = " ".join(sys.argv[1:]) or "traditional knowledge patent exclusion"
-    results = search(query, top_k=5)
+    results = asyncio.run(search(query, top_k=5))
     print(f"\nReranked results for: {query!r}\n")
     if not results:
         print("  (no results)")
