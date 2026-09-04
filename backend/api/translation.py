@@ -89,7 +89,19 @@ PROTECTED_AYURVEDIC_TERMS: dict[str, str] = {
     "arishta": "Arishta", "अरिष्ट": "Arishta",
 }
 
-_PROTECT_PLACEHOLDER = "XPROTECTEDTERMX{index}X"
+# Purely numeric, not "XPROTECTEDTERMX{index}X" as originally written — found
+# to be a real bug, not a hypothetical, by capturing actual API output while
+# writing docs/API_CONTRACT.md: an alphabetic placeholder reads as an
+# unrecognized English word to Sarvam, which transliterated it into
+# Devanagari instead of passing it through ("XPROTECTEDTERMX0X" came back as
+# "एक्सप्रोटेक्टेडटेरएमएक्स0एक्स"), so the exact-string restore below never
+# matched and the mangled placeholder leaked into a real user-facing answer.
+# Confirmed by testing several formats against the live API: purely numeric
+# placeholders survive verbatim (Sarvam recognizes them as numbers, not
+# words). 9911...1199 wrapping is long and distinctive enough that it won't
+# coincidentally collide with a real number already in the source text
+# (section numbers, years, page numbers are all far shorter).
+_PROTECT_PLACEHOLDER = "9911{index:04d}1199"
 
 
 def _protect_terms(text: str) -> tuple[str, dict[str, str]]:

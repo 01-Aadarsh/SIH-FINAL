@@ -62,9 +62,10 @@ up and generating an answer (or abstaining). Never more than one retry.
 | Dense retrieval | sentence-transformers, `all-MiniLM-L6-v2` (384 dims) |
 | Vector store | pgvector on Postgres (Neon, in this deployment) |
 | Reranker | cross-encoder, `ms-marco-MiniLM-L-6-v2`, run locally |
-| LLM primary | Ollama (local) — wired in, currently not working, see below |
-| LLM fallback | Groq API — currently the backend's actual, working path |
-| Frontend | Not built here (see Current status) |
+| LLM primary | Groq API — direct, no local-first guessing on the live path |
+| LLM offline fallback | Ollama (local), gated behind `OFFLINE_MODE=true` — an explicit operator flag, not tried automatically per-request (see `idea.md` for why that changed) |
+| Translation | Sarvam AI — question in, answer out, wired into `/query` (not `/query/stream`) |
+| Frontend | Not built here — being handled by a teammate against `docs/API_CONTRACT.md` (see Current status) |
 
 ## Repo layout
 
@@ -75,12 +76,16 @@ up and generating an answer (or abstaining). Never more than one retry.
 ├── docs/
 │   └── API_CONTRACT.md    Backend HTTP interface, for frontend integration
 ├── data/                   Source PDFs (gitignored — see Document corpus)
+│   └── international/      Placeholder — no documents indexed yet, see its README
 └── backend/
-    ├── ingestion/          loader.py, chunker.py, indexer.py
+    ├── ingestion/          loader.py, chunker.py (hierarchical statutory chunking), indexer.py
     ├── retrieval/          bm25_search.py, dense_search.py, fusion.py, reranker.py
     ├── generation/         prompts.py, llm_client.py, citation.py
-    ├── graph/              state.py, nodes.py, build_graph.py
-    ├── api/                main.py
+    ├── graph/              state.py, nodes.py, build_graph.py, formulation.py
+    ├── api/                main.py, translation.py, tts.py, text_chunking.py
+    ├── tests/              pytest suite — retrieval determinism, translation, API contract
+    ├── run.py              actual entrypoint on Windows — see API_CONTRACT.md
+    ├── Procfile
     ├── requirements.txt
     └── env.example.txt
 ```
@@ -148,64 +153,83 @@ python -m graph "What does Section 3(p) say about traditional knowledge?"
 
 **Run the API:**
 ```bash
-python -m uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+python run.py
 ```
-Then `GET /health`, `POST /query`, `POST /ingest`. Full request/response
-shapes, real example responses, and timing expectations are in
-[docs/API_CONTRACT.md](docs/API_CONTRACT.md) — that's the source of truth
-for frontend integration, not this file.
+**On Windows, use `python run.py`, not a bare `uvicorn api.main:app`** —
+`uvicorn` creates its event loop before importing the app, which breaks
+psycopg's async mode under Windows' default event loop. `run.py` fixes
+this before anything else is imported. `uvicorn api.main:app --reload`
+still works for hot-reload dev on Linux/macOS, where this doesn't apply.
+
+Then `GET /health`, `POST /query`, `POST /query/stream`, `POST /ingest`.
+Full request/response shapes, real example responses, and timing
+expectations are in [docs/API_CONTRACT.md](docs/API_CONTRACT.md) — that's
+the source of truth for frontend integration, not this file.
 
 ## Current status
 
 **Done:**
-- Ingestion (PDF loading, chunking with citation metadata, dual indexing
-  into pgvector + BM25)
-- Hybrid retrieval (BM25 + dense, fused by RRF) with reranking
+- Ingestion — PDF loading, hierarchical statutory chunking (each Act
+  section/clause is its own citable chunk, not a slice of a fixed-size
+  window) with best-effort statutory tagging, dual indexing into pgvector
+  + BM25 (jurisdiction-partitioned)
+- Hybrid retrieval (BM25 + dense, fused by RRF) with a calibrated
+  cross-encoder reranker
 - Grounded generation with programmatic citation attachment and a verified
   abstention guardrail
-- LangGraph DAG wiring the above into one deterministic pipeline, with a
-  bounded single retry on weak retrieval
-- FastAPI layer (`/query`, `/health`, `/ingest`), tested against a live
-  running server
+- Deterministic formulation-category triage (classical / proprietary /
+  phytopharmaceutical / Ayurveda-Aahar / cosmetic), keyword-based, with
+  genuine-ambiguity clarification detection
+- LangGraph DAG wiring the above into one async pipeline, with a bounded
+  single retry on weak retrieval
+- Multilingual — Sarvam AI, question translated to English before
+  retrieval, answer translated back after generation (`/query` only)
+- FastAPI layer: `/query`, `/query/stream` (SSE token streaming),
+  `/health`, `/ingest` — see `docs/API_CONTRACT.md` for the full, current
+  contract (this file is not the source of truth for API shape)
+- Automated test suite (`backend/tests/`) covering retrieval determinism,
+  translation correctness, and API-contract drift, run against the real
+  live pipeline, not mocks
 
 **Not yet built:**
 - Frontend — being handled by a teammate against `docs/API_CONTRACT.md`
-- Multilingual support (Bhashini) — deferred per the original build plan,
-  English-only for now
-- Deployment — everything above has only been run locally
+- TTS — wired in (Groq), but not yet functional: the Groq account backing
+  this hasn't accepted the TTS model's usage terms. See
+  `backend/env.example.txt`'s `GROQ_TTS_VOICE` comment for the one manual
+  step that unblocks it.
+- International-jurisdiction documents — the routing and DB partitioning
+  exist end to end, but `data/international/` has no PDFs in it yet (see
+  that folder's README for what's expected). Real source documents are
+  required before this becomes real coverage — no placeholder/fabricated
+  content has been added.
+- Deployment — everything above has only been run locally so far
+  (`backend/Procfile` exists for Render/Railway, unused so far)
 
-**Known limitation, stated plainly:** the architecture calls for a local
-Ollama model as the primary LLM (so the system keeps working if venue WiFi
-fails), with Groq as a fallback. Ollama is wired into the code and will be
-tried first on every request, but on the current dev machine its GPU path
-crashes on start (a CUDA driver/runtime mismatch), so every request
-currently times out against Ollama and falls back to Groq. **In its present
-state, the demo depends on internet access to reach Groq** — the offline
-path is implemented but not currently functional on this hardware. This
-also means typical response times are slower than they should be (real
-measured range: ~29s for a normal query, ~54s for a query that triggers the
-system's internal retry), since each request pays the Ollama timeout before
-Groq is tried. Fixing the CUDA issue (or running on different hardware) is
-the actual fix; the current timeout tuning is a mitigation, not a solution.
+**LLM backend, current architecture (changed since this file was first
+written):** Groq is the direct primary path now — no local-first guessing
+on every request. Local Ollama is still available for a venue-WiFi-fails
+scenario, gated behind an explicit `OFFLINE_MODE=true` flag in the
+backend's `.env`, not tried automatically. See `idea.md` for why this
+flipped from the original Ollama-primary design (short version: Ollama's
+GPU path crashes on the dev machine this was built on, forcing slow
+CPU-only inference that was costing every request real, measured delay
+before ever reaching Groq).
 
 ## Document corpus
 
-The system can only answer from what's actually indexed. As of this
-writing, `data/` contains 9 PDFs, 1019 chunks total:
+The system can only answer from what's actually indexed — and what's
+indexed changes as the corpus grows, so this file doesn't hand-maintain a
+copy of that list (it did once; it went stale). The authoritative list is
+always:
+```bash
+ls data/*.pdf
+```
+or, for chunk counts per document, the output of the last
+`python -m ingestion.indexer` run (also queryable directly: `SELECT
+source_file, COUNT(*) FROM chunks GROUP BY source_file;`).
 
-| Document | What it is |
-|---|---|
-| `Patents_Act_1970.pdf` | The Patents Act, 1970 (as amended) — includes Section 3(p), the traditional-knowledge non-patentability provision |
-| `Manual_of_Patent_Office_Practice_and_Procedure.pdf` | CGPDTM's Manual of Patent Office Practice and Procedure, including its worked explanation of Section 3(p) |
-| `IPO_Guidelines_Traditional_Knowledge_and_Biological_Material.pdf` | IP India's guidelines for examining patent applications involving traditional knowledge or biological material |
-| `GI_Act_1999.pdf` | The Geographical Indications of Goods (Registration and Protection) Act, 1999 |
-| `New_Drugs_and_Clinical_Trials_Rules_2019.pdf` | The New Drugs and Clinical Trials Rules, 2019 (CDSCO) |
-| `National_IPR_Policy_2016.pdf` | National IPR Policy, 2016 |
-| `Jan_Vishwas_Amendment_of_Provisions_Act_2023.pdf` | Jan Vishwas (Amendment of Provisions) Act, 2023 — decriminalizes minor offences across several Acts, including IP statutes |
-| `Documenting_Traditional_Knowledge_EACPM.pdf` | EACPM report on documenting traditional knowledge |
-| `PIB_TKDL_Factsheet.pdf` | PIB factsheet on the Traditional Knowledge Digital Library (TKDL) |
-
-Questions outside what these documents cover — including questions about
-international IP regimes, or anything unrelated to Indian IP/Ayurveda
-regulation — are expected to trigger the abstention guardrail, not a
-guessed answer. That's the intended behavior, not a gap to route around.
+Questions outside what's actually indexed — including
+`jurisdiction: "international"` questions right now (see above), or
+anything unrelated to Indian IP/Ayurveda regulation — are expected to
+trigger the abstention guardrail, not a guessed answer. That's the
+intended behavior, not a gap to route around.
