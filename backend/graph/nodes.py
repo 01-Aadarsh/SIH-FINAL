@@ -20,7 +20,7 @@ import logging
 
 from generation.citation import attach_citations, is_abstention
 from generation.llm_client import acomplete, agenerate
-from graph.formulation import CATEGORY_STATUTORY_TAGS, classify_formulation
+from graph.formulation import CATEGORY_STATUTORY_TAGS, triage_formulation
 from graph.state import DEFAULT_FLAGS, DEFAULT_JURISDICTION, GraphState
 from retrieval.bm25_search import search as bm25_search_sync
 from retrieval.dense_search import search as dense_search
@@ -29,7 +29,28 @@ from retrieval.reranker import rerank as rerank_sync
 
 log = logging.getLogger(__name__)
 
-FUSED_TOP_K = 20
+# 40, not 20: raised after finding a real regression from
+# HierarchicalStatutoryChunker, not a hypothetical one. Clause-level chunks
+# are shorter and lexically sparser than the old ~2000-char sliding-window
+# chunks, so a single relevant clause can rank well individually on BM25 or
+# dense (e.g. Patents_Act_1970's Section 3(p) clause: BM25 rank 59, dense
+# rank 12, both for the literal query "What does Section 3(p) say about
+# traditional knowledge?" — a query that worked reliably all session before
+# this chunker existed) but still miss RRF's combined top-20 cutoff, since
+# RRF rewards a chunk that scores decently on *both* signals over one that
+# scores well on only one. Confirmed empirically: at 20, the model saw only
+# generic background chunks and correctly-per-its-context abstained
+# ("which act's Section 3(p)?"); at 40, the actual Section 3(p) passage
+# (Patent_Office_Manual_Practice_Procedure_2011) becomes the top candidate
+# at 0.997 confidence. 40 was chosen as the smallest tested value that
+# fixed this specific regression — not pushed further, since a similar
+# investigation for "What is a trademark?" (a query that was already
+# unreliable before this chunker, not something this chunker broke) showed
+# that query's actual definitional clause needs top-~500 pooling to
+# reach, and doubling every query's reranking cost to chase one already-
+# marginal query isn't a trade worth making — see
+# tests/test_retrieval_determinism.py's module docstring.
+FUSED_TOP_K = 40
 RERANK_TOP_K = 5
 
 # rerank_score is now a calibrated sigmoid(raw_logit) in [0, 1] — see
@@ -77,12 +98,17 @@ def triage_formulation_node(state: GraphState) -> dict:
     """Deterministic keyword classification — no I/O, no LLM call. Runs
     after rewrite_query (so it sees the standalone-question form) and
     before retrieve. See graph/formulation.py for why this is intentionally
-    not LLM-based."""
+    not LLM-based, and for needs_clarification/clarifying_questions: set
+    when the question's keywords span 2+ formulation categories, surfaced
+    to the caller but not blocking — generation proceeds using the
+    first-matched category regardless."""
     query = state.get("rewritten_query") or state["query"]
-    category = classify_formulation(query)
+    triage = triage_formulation(query)
     return {
-        "formulation_category": category,
-        "statutory_tags": CATEGORY_STATUTORY_TAGS[category],
+        "formulation_category": triage["formulation_category"],
+        "statutory_tags": CATEGORY_STATUTORY_TAGS[triage["formulation_category"]],
+        "needs_clarification": triage["needs_clarification"],
+        "clarifying_questions": triage["clarifying_questions"],
     }
 
 
@@ -189,9 +215,7 @@ def attach_citations_node(state: GraphState) -> dict:
     return {"citations": attach_citations(state["reranked"])}
 
 
-async def run_retrieval_stage(
-    rewritten_query: str, jurisdiction: str
-) -> tuple[list[dict], dict, str, list[str]]:
+async def run_retrieval_stage(rewritten_query: str, jurisdiction: str) -> GraphState:
     """triage -> retrieve -> rerank -> bounded retry, composed from the same
     node functions the compiled graph uses for this exact sequence (see
     build_graph.py) — not a reimplementation of the retry threshold logic.
@@ -206,10 +230,12 @@ async def run_retrieval_stage(
     compiled graph end to end; this helper's output is identical to what
     that graph produces up through reranking, by construction.
 
-    Returns (reranked, flags, formulation_category, statutory_tags) — flags
-    carries both "retried" and "weak_grounding" (see rerank_node), not just
-    the one bool this returned before formulation triage and the weak-
-    grounding diagnostic were added.
+    Returns the full working state (reranked, flags, formulation_category,
+    statutory_tags, needs_clarification, clarifying_questions) rather than a
+    positional tuple — that tuple grew twice already as fields were added
+    (weak_grounding, then clarification) and a dict-like state is what
+    every node here already produces and consumes, so the caller (api/
+    main.py) reads named keys the same way a node would.
     """
     state: GraphState = {
         "rewritten_query": rewritten_query,
@@ -225,9 +251,4 @@ async def run_retrieval_stage(
         state.update(await retrieve(state))
         state.update(await rerank_node(state))
 
-    return (
-        state["reranked"],
-        state["flags"],
-        state["formulation_category"],
-        state["statutory_tags"],
-    )
+    return state

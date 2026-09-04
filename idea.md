@@ -131,6 +131,71 @@ rather than guessed. `/query` degrades gracefully either way
 the one manual step (visit the Groq Playground, accept the terms, set
 `GROQ_TTS_VOICE`) that turns this on.
 
+**Hierarchical statutory chunking** (`backend/ingestion/chunker.py::
+HierarchicalStatutoryChunker`) replaces the plain sliding-window chunker
+for documents where it applies (10 of 22, gated by
+`MIN_SECTIONS_TO_TRUST_HIERARCHICAL_PARSE` — a document without real
+Section/clause structure falls back to the plain chunker rather than being
+mis-chunked by a pattern that doesn't fit it). Each lettered/numbered
+clause within a section becomes its own citable chunk — Trade_Marks_Act_
+1999's Section 2(1)(zb) ("trade mark" means...) and Patents_Act_1970's
+Section 3(p) (the TK exclusion) are now clean, complete, individually-
+tagged chunks instead of buried inside a 2000-character window alongside a
+dozen unrelated clauses. `graph/nodes.py::FUSED_TOP_K` is 40, not 20 — see
+its comment for a real regression this exact change caused and fixed: a
+previously-reliable flagship query ("What does Section 3(p) say about
+traditional knowledge?") started abstaining right after switching to
+clause-level chunking, because a short, isolated clause can rank decently
+on BM25 or dense individually while still missing RRF's narrower top-20
+cutoff. Caught by testing, not shipped on the strength of the chunker fix
+alone — see `tests/test_retrieval_determinism.py::
+test_section_3p_query_does_not_regress`. A separate, harder case
+("What is a trademark?", already unreliable before this chunker existed —
+see the retrieval-determinism section above) needs ~top-500 pooling to
+reach its own definition clause; raising FUSED_TOP_K that far to chase one
+already-marginal query wasn't judged worth doubling-plus every query's
+reranking cost for, and is left as an honestly-documented open gap rather
+than force-fixed.
+
+Statutory tags (`ingestion/chunker.py::tag_statutory_metadata`) now also
+match against the hierarchical chunker's exact "Section N. Title, clause
+(x)" heading, not just body text — far more precise (a heading match means
+"this chunk IS clause 3(p)", not "the text happens to mention 3(p)
+somewhere"). Canonical tag taxonomy: `Patents_Act_Sec3p`,
+`Patents_Act_Sec3d`, `Patents_Act_Sec3e`, `D&C_First_Schedule`,
+`D&C_Rule_158B`, `BDA_Sec6_NBA_Approval`, `BDA_Sec7_SBB_Exemption`,
+`TKDL`, `FSSAI_Ayurveda_Aahar_2022`, `No_Therapeutic_Claim`,
+`Clinical_Validation`, plus the reserved-not-yet-firing
+`WIPO_GRATK_Art3_Disclosure` (see `data/international/README.md`). Still a
+best-effort keyword/heading heuristic, not authoritative legal
+categorization — said directly in the module's own docstring.
+
+**Formulation triage** (`graph/formulation.py::triage_formulation`,
+wired into the graph as `triage_formulation_node`) now checks every
+category pattern, not just the first match, so a question whose keywords
+genuinely span two categories (e.g. "nutraceutical" + "proprietary
+formulation") sets `needs_clarification=True` and a `clarifying_questions`
+list, surfaced in the API response — informational, not blocking:
+generation still answers, using the first-matched category. Deliberately
+still not LLM-based, for the same reason as before: an LLM classifier here
+would reintroduce non-determinism one step earlier than the retry does.
+
+**Declined, not attempted**: fabricating the text of the Biological
+Diversity (Amendment) Act 2023, Biological Diversity Rules 2024, or the
+WIPO GRATK Treaty 2024 from memory to seed as corpus content. This system's
+core design is "answer only from real retrieved text, abstain rather than
+guess" — writing out specific section numbers and provisos from training-
+data recollection and indexing them as if they were the authoritative
+statute text would be exactly the failure mode that design exists to
+prevent, in a tool meant to inform real legal/regulatory decisions. If
+real source PDFs for these become available, the ingestion pipeline
+already handles them (`data/` for India, `data/international/` for
+treaties) with no code changes needed. Note: the currently-indexed
+`Biological_Diversity_Act_2002.pdf` already reflects some 2023 amendments
+inline (e.g. "Ins. by Act 10 of 2023, s. 3, (w.e.f. 1-4-2024)" footnotes on
+amended clauses) — it is not entirely absent from the corpus, just not
+indexed as its own separate amendment-act document.
+
 ## Tech stack
 
 | Layer | Choice |

@@ -234,6 +234,21 @@ class QueryResponse(BaseModel):
             "GROQ_TTS_VOICE isn't configured, or synthesis failed."
         ),
     )
+    needs_clarification: bool = Field(
+        default=False,
+        description=(
+            "True when formulation triage matched 2+ categories in the "
+            "question (see graph/formulation.py) — genuinely ambiguous, not "
+            "just coarse keyword noise. Informational, not blocking: `answer` "
+            "still answers, using the first-matched category, and "
+            "`clarifying_questions` suggests what a follow-up turn (via "
+            "`history`) could narrow down."
+        ),
+    )
+    clarifying_questions: list[str] = Field(
+        default_factory=list,
+        description="Always [] when needs_clarification is false.",
+    )
 
 
 class IngestRequest(BaseModel):
@@ -339,6 +354,8 @@ async def query(req: QueryRequest):
         citations=result.get("citations") or [],
         flags=result.get("flags") or {},
         formulation_category=result.get("formulation_category") or "classical",
+        needs_clarification=result.get("needs_clarification") or False,
+        clarifying_questions=result.get("clarifying_questions") or [],
         audio_base64=audio_base64,
     )
 
@@ -376,10 +393,14 @@ async def query_stream(req: QueryRequest):
             rewrite_state = await rewrite_query({"query": req.question, "history": history})
             rewritten = rewrite_state["rewritten_query"]
 
-            reranked, flags, formulation_category, statutory_tags = await asyncio.wait_for(
+            retrieval_state = await asyncio.wait_for(
                 run_retrieval_stage(rewritten, req.jurisdiction),
                 timeout=RETRIEVAL_TIMEOUT,
             )
+            reranked = retrieval_state["reranked"]
+            flags = retrieval_state["flags"]
+            formulation_category = retrieval_state["formulation_category"]
+            statutory_tags = retrieval_state["statutory_tags"]
 
             parts: list[str] = []
             async for token in astream_generate(rewritten, reranked, formulation_category, statutory_tags):
@@ -397,6 +418,8 @@ async def query_stream(req: QueryRequest):
                     "citations": citations,
                     "flags": flags,
                     "formulation_category": formulation_category,
+                    "needs_clarification": retrieval_state["needs_clarification"],
+                    "clarifying_questions": retrieval_state["clarifying_questions"],
                 },
             )
         except asyncio.TimeoutError:

@@ -17,6 +17,8 @@ class GraphState(TypedDict, total=False):
     jurisdiction: str  # "india" or "international" — see ingestion.indexer.JURISDICTIONS
     formulation_category: str  # see graph.formulation.FORMULATION_CATEGORIES
     statutory_tags: list[str]  # see graph.formulation.CATEGORY_STATUTORY_TAGS
+    needs_clarification: bool  # true when triage matched 2+ formulation categories
+    clarifying_questions: list[str]  # informational — generation proceeds regardless, using the first-matched category
     rewritten_query: str
     candidates: list[dict]  # fused top-20, before reranking
     bm25_top_score: float  # top raw BM25 score from this round's retrieve() — diagnostic only

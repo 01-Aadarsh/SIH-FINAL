@@ -60,17 +60,22 @@ _CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
     ),
 ]
 
-# Blueprint-specified tags for classical, proprietary, and Ayurveda-Aahar.
-# phytopharmaceutical and cosmetic weren't given explicit tag sets in the
-# original request — these are a reasonable extrapolation from how those
-# categories are actually regulated (D&C Rules for phytopharmaceuticals,
-# no-therapeutic-claim for cosmetics), not a literal spec, and should be
-# reviewed the same as the rest of this heuristic.
+# Canonical tag taxonomy. Every name here must match a real tag that
+# ingestion/chunker.py::_compile_statutory_tag_rules or
+# _compile_heading_tag_rules can actually produce — WIPO_GRATK_Art3_
+# Disclosure is the one reserved exception, listed in data/international/
+# README.md as not yet firing because no source document exists to tag
+# (see idea.md). classical/proprietary/ayurveda_aahar were given
+# explicitly; phytopharmaceutical and cosmetic's tag sets are a reasonable
+# extrapolation from how those categories are actually regulated (D&C
+# Rules for phytopharmaceuticals, no-therapeutic-claim for cosmetics), not
+# a literal spec, and should be reviewed the same as the rest of this
+# heuristic.
 CATEGORY_STATUTORY_TAGS: dict[str, list[str]] = {
-    "classical": ["Patents_Act_Sec3p", "TKDL", "D&C_First_Schedule", "BDA_Exemption"],
-    "proprietary": ["Patents_Act_Sec3e", "BDA_Section6_NBA_Form1_Form2", "Clinical_Validation"],
-    "phytopharmaceutical": ["D&C_Phytopharmaceutical_Definition", "Clinical_Validation"],
-    "ayurveda_aahar": ["FSSAI_Ayurveda_Aahar_Regs_2022", "No_Therapeutic_Claim"],
+    "classical": ["Patents_Act_Sec3p", "Patents_Act_Sec3d", "TKDL", "D&C_First_Schedule", "BDA_Sec7_SBB_Exemption"],
+    "proprietary": ["Patents_Act_Sec3e", "BDA_Sec6_NBA_Approval", "Clinical_Validation"],
+    "phytopharmaceutical": ["D&C_Rule_158B", "Clinical_Validation"],
+    "ayurveda_aahar": ["FSSAI_Ayurveda_Aahar_2022", "No_Therapeutic_Claim"],
     "cosmetic": ["D&C_Cosmetic_Rules", "No_Therapeutic_Claim"],
 }
 
@@ -82,14 +87,61 @@ CATEGORY_LABELS: dict[str, str] = {
     "cosmetic": "Cosmetic",
 }
 
+_CLARIFYING_DESCRIPTIONS: dict[str, str] = {
+    "classical": "a classical/traditional Ayurvedic formulation (e.g. from a recognized classical text)",
+    "proprietary": "a proprietary (P&P) medicine with a brand name and its own formulation",
+    "phytopharmaceutical": "a phytopharmaceutical drug (standardized botanical extract)",
+    "ayurveda_aahar": "an Ayurveda-Aahar / nutraceutical food product",
+    "cosmetic": "a cosmetic product",
+}
+
+
+def triage_formulation(query: str) -> dict:
+    """
+    Keyword-match `query` against every category (not just the first hit),
+    so genuine ambiguity — two or more categories' keywords both present —
+    is detectable, not silently resolved by whichever pattern happens to
+    be checked first.
+
+    Zero matches still defaults to "classical" without asking for
+    clarification: most TK/Section 3(p)-style questions in this domain
+    genuinely are about classical formulations, so an unclassifiable
+    question defaulting there is a reasonable prior, not something to
+    interrupt the user over. Two or more matches DO ask — that's a real
+    signal the question spans categories with materially different
+    statutory obligations (e.g. mentioning both "nutraceutical" and
+    "proprietary formulation" could mean either), not just coarse
+    keyword-matching noise.
+
+    Returns a dict — not a class — since this is exactly what gets merged
+    into GraphState (a plain dict-of-keys, per this project's node
+    convention; see graph/nodes.py).
+    """
+    matched = [category for category, pattern in _CATEGORY_PATTERNS if pattern.search(query)]
+
+    if len(matched) >= 2:
+        options = " or ".join(_CLARIFYING_DESCRIPTIONS[c] for c in matched)
+        question = (
+            f"This question touches more than one formulation category — is it "
+            f"about {options}? The answer below assumes {CATEGORY_LABELS[matched[0]]} "
+            f"unless you clarify."
+        )
+        return {
+            "formulation_category": matched[0],
+            "needs_clarification": True,
+            "clarifying_questions": [question],
+        }
+
+    category = matched[0] if matched else "classical"
+    return {
+        "formulation_category": category,
+        "needs_clarification": False,
+        "clarifying_questions": [],
+    }
+
 
 def classify_formulation(query: str) -> str:
-    """Keyword-match `query` against each category in priority order,
-    defaulting to "classical" — most TK/Section 3(p)-style questions in
-    this domain are, in fact, about classical formulations, so an
-    unclassifiable question defaulting there is a reasonable prior, not an
-    arbitrary fallback."""
-    for category, pattern in _CATEGORY_PATTERNS:
-        if pattern.search(query):
-            return category
-    return "classical"
+    """Category only, no clarification info — thin wrapper over
+    triage_formulation() for callers (e.g. tests) that just want the
+    category."""
+    return triage_formulation(query)["formulation_category"]

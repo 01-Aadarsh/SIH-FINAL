@@ -24,7 +24,7 @@ is India's domestic ABS law and stays in `data/`, not here):
   are exactly what should co-occur with its disclosure-obligation clauses.
 - **Nagoya Protocol on Access and Benefit-Sharing** (full text) — the
   international ABS counterpart to the domestic BD Act's Section 6/NBA
-  process already tagged `BDA_Section6_NBA_Form1_Form2` (see
+  process already tagged `BDA_Sec6_NBA_Approval` (see
   `ingestion/chunker.py::tag_statutory_metadata`).
 - **Budapest Treaty** (international recognition of microorganism deposit
   for patent procedure) — relevant to any classical/proprietary Ayurvedic
@@ -34,8 +34,11 @@ is India's domestic ABS law and stays in `data/`, not here):
 
 None of these are indexed yet — this folder is empty as of this writing.
 Reserved (not yet applied to any chunk) statutory tag names for when they
-are: `WIPO_GRATK_Disclosure_Obligation`, `Nagoya_ABS_Clearing_House`,
-`Budapest_Treaty_Deposit`. Add them to
+are: `WIPO_GRATK_Art3_Disclosure` (Article 3's mandatory origin-disclosure
+obligation specifically — Articles 4-7 covering exceptions, information
+systems, and sanctions/remedies would need their own tags once the treaty
+text is actually here and its real structure is known, not guessed),
+`Nagoya_ABS_Clearing_House`, `Budapest_Treaty_Deposit`. Add them to
 `ingestion/chunker.py::_STATUTORY_TAG_RULES` alongside real source-file/
 keyword rules once the actual PDF is here — a reserved name with no rule
 pointed at real text would never fire, so don't add the tag name without
