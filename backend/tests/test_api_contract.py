@@ -31,7 +31,7 @@ from api.main import Flags, QueryRequest, QueryResponse
 # of silently in a teammate's frontend code.
 DOCUMENTED_REQUEST_FIELDS = {"question", "history", "jurisdiction", "language", "synthesize_audio"}
 DOCUMENTED_RESPONSE_FIELDS = {
-    "answer", "citations", "flags", "formulation_category",
+    "answer", "citations", "flags", "formulation_category", "confidence_score",
     "needs_clarification", "clarifying_questions", "audio_base64",
 }
 DOCUMENTED_FLAGS_FIELDS = {"abstained", "retried", "weak_grounding"}

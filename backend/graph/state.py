@@ -23,6 +23,7 @@ class GraphState(TypedDict, total=False):
     candidates: list[dict]  # fused top-20, before reranking
     bm25_top_score: float  # top raw BM25 score from this round's retrieve() — diagnostic only
     reranked: list[dict]  # reranked top-5, rerank_score is a calibrated 0-1 confidence (see retrieval/reranker.py)
+    confidence_score: float  # top reranked chunk's rerank_score, 0.0 if reranked is empty — exposed as QueryResponse.confidence_score
     answer: str
     citations: list[dict]
     flags: dict

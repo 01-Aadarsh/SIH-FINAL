@@ -4,9 +4,11 @@ Formulation-category triage for IP-SAKTI.
 Classifies which regulatory posture a question is asking about — an
 Ayurvedic product's IP/ABS/labeling obligations differ sharply depending on
 whether it's a classical formulation, a proprietary (P&P) medicine, a
-phytopharmaceutical, a nutraceutical (Ayurveda-Aahar), or a cosmetic — and
-injects that category plus its statutory tags into the generation prompt so
-the LLM answers with the right regulatory frame in view, not a generic one.
+phytopharmaceutical, a nutraceutical (Ayurveda-Aahar), a cosmetic, or a new/
+non-classical drug requiring CDSCO clinical trial permission under the NDCT
+Rules 2019 — and injects that category plus its statutory tags into the
+generation prompt so the LLM answers with the right regulatory frame in
+view, not a generic one.
 
 Deterministic on purpose, not an LLM call: this project's whole retry
 mechanism exists because LLM-driven decisions (query rewriting) aren't
@@ -36,6 +38,7 @@ FORMULATION_CATEGORIES: tuple[str, ...] = (
     "phytopharmaceutical",
     "ayurveda_aahar",
     "cosmetic",
+    "new_or_non_classical_drug",
 )
 
 # Checked in this fixed order, first match wins — order matters where terms
@@ -58,6 +61,26 @@ _CATEGORY_PATTERNS: list[tuple[str, re.Pattern]] = [
         "proprietary",
         re.compile(r"\b(proprietary medicine|patent(?:ed)? or proprietary|p\s*(?:&|and)\s*p\b|proprietary ayurvedic|proprietary formulation)\b", re.I),
     ),
+    (
+        # Deliberately narrow, distinctive phrasing (NDCT Rules 2019 terms
+        # of art) rather than the generic "clinical trial" alone — that
+        # phrase alone already feeds CATEGORY_STATUTORY_TAGS's
+        # Clinical_Validation tag for *every* category below and would
+        # false-positive on, e.g., a phytopharmaceutical or proprietary
+        # question that merely mentions clinical validation in passing.
+        # "new drug"/"non-classical drug" and NDCT-specific terms (IND,
+        # safety dossier, new chemical entity) are what actually
+        # distinguishes "this needs a fresh CDSCO clinical-trial-permission
+        # pathway" from "this is an established category with its own
+        # lighter-weight route".
+        "new_or_non_classical_drug",
+        re.compile(
+            r"\b(new drug|non-classical drug|novel (?:ayurvedic )?drug|"
+            r"investigational new drug|\bind application\b|safety dossier|"
+            r"clinical trial permission|ndct rules|new chemical entity)\b",
+            re.I,
+        ),
+    ),
 ]
 
 # Canonical tag taxonomy. Every name here must match a real tag that
@@ -77,6 +100,7 @@ CATEGORY_STATUTORY_TAGS: dict[str, list[str]] = {
     "phytopharmaceutical": ["D&C_Rule_158B", "Clinical_Validation"],
     "ayurveda_aahar": ["FSSAI_Ayurveda_Aahar_2022", "No_Therapeutic_Claim"],
     "cosmetic": ["D&C_Cosmetic_Rules", "No_Therapeutic_Claim"],
+    "new_or_non_classical_drug": ["NDCT_Rules_2019", "Clinical_Validation"],
 }
 
 CATEGORY_LABELS: dict[str, str] = {
@@ -85,6 +109,7 @@ CATEGORY_LABELS: dict[str, str] = {
     "phytopharmaceutical": "Phytopharmaceutical",
     "ayurveda_aahar": "Ayurveda-Aahar (Nutraceutical)",
     "cosmetic": "Cosmetic",
+    "new_or_non_classical_drug": "New / Non-Classical Drug (NDCT Rules 2019)",
 }
 
 _CLARIFYING_DESCRIPTIONS: dict[str, str] = {
@@ -93,6 +118,7 @@ _CLARIFYING_DESCRIPTIONS: dict[str, str] = {
     "phytopharmaceutical": "a phytopharmaceutical drug (standardized botanical extract)",
     "ayurveda_aahar": "an Ayurveda-Aahar / nutraceutical food product",
     "cosmetic": "a cosmetic product",
+    "new_or_non_classical_drug": "a new or non-classical drug requiring clinical trial permission under the NDCT Rules 2019",
 }
 
 

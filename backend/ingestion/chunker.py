@@ -125,6 +125,7 @@ def _compile_statutory_tag_rules():
         ("Biological_Diversity_Act", r"vaids?|hakims?|codified traditional knowledge|state biodiversity board", "BDA_Sec7_SBB_Exemption"),
         ("Biological_Diversity_Act", r"national biodiversity authority|\bform\s+i\b|\bform\s+ii\b|section\s+6\b", "BDA_Sec6_NBA_Approval"),
         ("Ayurveda_Aahara", r".", "FSSAI_Ayurveda_Aahar_2022"),  # whole document is this regulation
+        ("NDCT_Rules", r".", "NDCT_Rules_2019"),  # whole document is this regulation
         ("", r"therapeutic claim", "No_Therapeutic_Claim"),
         ("", r"clinical trial|clinical validation|clinical stud(y|ies)", "Clinical_Validation"),
     ]

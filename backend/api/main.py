@@ -52,6 +52,7 @@ from api.translation import TARGET_LANGUAGE_CODES, translate_text
 from api.tts import synthesize_speech
 from generation.citation import attach_citations, is_abstention
 from generation.llm_client import astream_generate
+from generation.prompts import append_disclaimer
 from graph.build_graph import build_graph
 from graph.nodes import rewrite_query, run_retrieval_stage
 from graph.state import DEFAULT_FLAGS
@@ -218,10 +219,24 @@ class QueryResponse(BaseModel):
         description=(
             "Deterministic keyword-based triage of the question into one of "
             "graph.formulation.FORMULATION_CATEGORIES (classical, proprietary, "
-            "phytopharmaceutical, ayurveda_aahar, cosmetic) — see graph/"
-            "formulation.py. A coarse heuristic used to frame the generation "
-            "prompt, not a legal determination; defaults to 'classical' when "
-            "no category-specific keyword matched."
+            "phytopharmaceutical, ayurveda_aahar, new_or_non_classical_drug, "
+            "cosmetic) — see graph/formulation.py. A coarse heuristic used to "
+            "frame the generation prompt, not a legal determination; defaults "
+            "to 'classical' when no category-specific keyword matched."
+        )
+    )
+    confidence_score: float = Field(
+        description=(
+            "The reranker's calibrated confidence (sigmoid of the cross-"
+            "encoder's raw logit, see retrieval/reranker.py) in the single "
+            "strongest retrieved chunk — the same number should_retry "
+            "thresholds against internally, not a separately-invented metric. "
+            "Range [0, 1]; 0.0 when nothing was retrieved. Reflects retrieval "
+            "quality, not whether the final answer happens to be an "
+            "abstention — a well-grounded retrieval can still end in "
+            "abstention if the model judges the retrieved text doesn't "
+            "actually answer the specific question asked, so don't treat a "
+            "high score here as a guarantee flags.abstained is false."
         )
     )
     audio_base64: str | None = Field(
@@ -354,6 +369,7 @@ async def query(req: QueryRequest):
         citations=result.get("citations") or [],
         flags=result.get("flags") or {},
         formulation_category=result.get("formulation_category") or "classical",
+        confidence_score=result.get("confidence_score") or 0.0,
         needs_clarification=result.get("needs_clarification") or False,
         clarifying_questions=result.get("clarifying_questions") or [],
         audio_base64=audio_base64,
@@ -407,10 +423,23 @@ async def query_stream(req: QueryRequest):
                 parts.append(token)
                 yield _sse("token", {"text": token})
 
-            answer = "".join(parts)
-            abstained = is_abstention(answer)
+            raw_answer = "".join(parts)
+            # is_abstention() runs on the model's raw output, same reasoning
+            # as generate_answer() in graph/nodes.py — the disclaimer doesn't
+            # start with ABSTENTION_MARKER regardless, but checking before
+            # appending is the obviously-correct order.
+            abstained = is_abstention(raw_answer)
             citations = [] if abstained else attach_citations(reranked)
             flags["abstained"] = abstained
+
+            # The disclaimer streams as one more real token event — not
+            # silently spliced into the `done` payload only — so a client
+            # rendering tokens as they arrive sees it appear the same way
+            # the rest of the answer did, instead of a jump at the end.
+            disclaimer_suffix = append_disclaimer(raw_answer)[len(raw_answer):]
+            yield _sse("token", {"text": disclaimer_suffix})
+            answer = raw_answer + disclaimer_suffix
+
             yield _sse(
                 "done",
                 {
@@ -418,6 +447,7 @@ async def query_stream(req: QueryRequest):
                     "citations": citations,
                     "flags": flags,
                     "formulation_category": formulation_category,
+                    "confidence_score": retrieval_state.get("confidence_score") or 0.0,
                     "needs_clarification": retrieval_state["needs_clarification"],
                     "clarifying_questions": retrieval_state["clarifying_questions"],
                 },

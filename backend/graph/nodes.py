@@ -20,6 +20,7 @@ import logging
 
 from generation.citation import attach_citations, is_abstention
 from generation.llm_client import acomplete, agenerate
+from generation.prompts import append_disclaimer
 from graph.formulation import CATEGORY_STATUTORY_TAGS, triage_formulation
 from graph.state import DEFAULT_FLAGS, DEFAULT_JURISDICTION, GraphState
 from retrieval.bm25_search import search as bm25_search_sync
@@ -149,7 +150,11 @@ async def rerank_node(state: GraphState) -> dict:
             bm25_top_score, top_confidence,
         )
 
-    return {"reranked": reranked, "flags": flags}
+    # Exposed to the API response as QueryResponse.confidence_score — the
+    # same calibrated sigmoid(raw_logit) that decides should_retry, not a
+    # separately-invented number. 0.0 (not missing) when reranked is empty,
+    # so callers never need a None check.
+    return {"reranked": reranked, "flags": flags, "confidence_score": top_confidence}
 
 
 def should_retry(state: GraphState) -> str:
@@ -204,8 +209,13 @@ async def generate_answer(state: GraphState) -> dict:
     )
 
     flags = dict(state.get("flags") or {})
+    # is_abstention() must run on the model's raw output, before the
+    # disclaimer is appended — the disclaimer text doesn't start with
+    # ABSTENTION_MARKER, so appending first would just be harmless, but
+    # checking the raw answer first is the more obviously-correct order and
+    # doesn't depend on that being true forever.
     flags["abstained"] = is_abstention(answer)
-    return {"answer": answer, "flags": flags}
+    return {"answer": append_disclaimer(answer), "flags": flags}
 
 
 def attach_citations_node(state: GraphState) -> dict:

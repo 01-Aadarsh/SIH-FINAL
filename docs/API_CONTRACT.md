@@ -15,6 +15,13 @@ also means the old timing table was describing a since-fixed slow path. If
 you built anything against the old version, re-read this one; more changed
 than any single diff would suggest.
 
+**Since that rewrite, two more additions** (both present in every response
+from `/query` and `/query/stream`'s `done` event, not optional): a
+`confidence_score` float, and every `answer` now ends with a fixed
+disclaimer sentence appended by the backend itself (not the LLM) — see
+their dedicated sections below. `formulation_category` also gained a 6th
+value, `new_or_non_classical_drug`.
+
 ## Running the backend locally
 
 ```bash
@@ -104,10 +111,12 @@ See `/query/stream` below if you want tokens as they're generated instead
 `pa-IN`, `ta-IN`, `te-IN`, `as-IN`, `brx-IN`, `doi-IN`, `kok-IN`, `ks-IN`,
 `mai-IN`, `mni-IN`, `ne-IN`, `sa-IN`, `sat-IN`, `sd-IN`, `ur-IN`.
 
-**Response `200`** (`QueryResponse`):
+**Response `200`** (`QueryResponse`), real captured output for `{"question":
+"What does Section 3(p) say about traditional knowledge?"}`, `time_total:
+7.7s`:
 ```json
 {
-  "answer": "string",
+  "answer": "Section 3(p) provides that an invention which, in effect, is traditional knowledge—or merely an aggregation or duplication of the known properties of traditionally known component(s)—is not considered an invention and therefore is not patentable.\n\n*Disclaimer: This assistant provides source-grounded regulatory information for guidance and does not constitute formal legal advice.*",
   "citations": [ /* array of Citation objects, see below — can be empty */ ],
   "flags": {
     "abstained": false,
@@ -115,6 +124,7 @@ See `/query/stream` below if you want tokens as they're generated instead
     "weak_grounding": false
   },
   "formulation_category": "classical",
+  "confidence_score": 0.9971599613006763,
   "needs_clarification": false,
   "clarifying_questions": [],
   "audio_base64": null
@@ -123,17 +133,65 @@ See `/query/stream` below if you want tokens as they're generated instead
 
 | Field | Type | Notes |
 |---|---|---|
-| `answer` | string | In `language` if translation succeeded, English if `language` was `"en-IN"` or translation failed (silent fallback — never a `500` because a translation call failed). |
+| `answer` | string | In `language` if translation succeeded, English if `language` was `"en-IN"` or translation failed (silent fallback — never a `500` because a translation call failed). **Always ends with the disclaimer sentence** (`"\n\n*Disclaimer: ...*"`) — appended by the backend after generation, not written by the LLM, and appended even on an abstention. See dedicated section below; don't strip it client-side unless you have your own reason to. |
 | `citations` | array | See Citation object below. Always `[]` when `flags.abstained` is `true`. |
 | `flags.abstained` | boolean | **The authoritative way to detect an abstention — do not string-match `answer`.** See dedicated section below. |
 | `flags.retried` | boolean | `true` if the backend internally retried retrieval once with a reworded query before answering/abstaining. Informational only. |
 | `flags.weak_grounding` | boolean | **New.** `true` when the lexical search found what looks like a strong keyword match but the semantic reranker's confidence was still low — a signal that retrieval/reranking may have underperformed for this specific question, distinct from the corpus genuinely lacking an answer. Informational only, doesn't change `abstained`. **Can be `true` even on a genuinely out-of-scope question** (real captured example below) — don't build UI logic that treats this as a strong "was this actually answerable" signal on its own. |
-| `formulation_category` | string | One of `classical`, `proprietary`, `phytopharmaceutical`, `ayurveda_aahar`, `cosmetic` — a coarse, deterministic keyword classification of which Ayurvedic-product regulatory category the question is probably about. Always present. Not a legal determination — a heuristic used to frame the answer, defaults to `"classical"` when nothing else matched. |
+| `formulation_category` | string | One of `classical`, `proprietary`, `phytopharmaceutical`, `ayurveda_aahar`, `cosmetic`, `new_or_non_classical_drug` — a coarse, deterministic keyword classification of which Ayurvedic-product regulatory category the question is probably about. Always present. Not a legal determination — a heuristic used to frame the answer, defaults to `"classical"` when nothing else matched. `new_or_non_classical_drug` covers questions about new-drug/clinical-trial-permission pathways under the NDCT Rules 2019 — see its dedicated example below. |
+| `confidence_score` | float | **New.** The cross-encoder reranker's calibrated confidence (0-1) in the single strongest retrieved chunk — the same number the backend's internal retry logic thresholds against. High (e.g. the `0.997` above) means retrieval found something clearly on-topic. **Not a guarantee `flags.abstained` is `false`** — a well-grounded retrieval can still end in abstention if the model judges the specific retrieved text doesn't actually answer the question asked (see the abstention example below, where `confidence_score` is near zero for a different, expected reason: nothing relevant exists in this corpus at all). Reflects retrieval quality, not answer correctness. |
 | `needs_clarification` | boolean | `true` when the question's keywords genuinely span 2+ formulation categories (e.g. mentions both "nutraceutical" and "proprietary formulation"). **Informational, not blocking** — `answer` still answers normally, using the first-matched category. |
 | `clarifying_questions` | array of strings | Always `[]` when `needs_clarification` is `false`. When non-empty, currently always exactly one string — a suggested follow-up question. Nothing stops you from sending it as the next `history` turn if the user picks it. |
 | `audio_base64` | string \| null | Base64-encoded WAV, **always English speech regardless of `language`** — there is no Indian-language TTS voice available, so this reads the pre-translation English answer, never the translated one. Do not present this as being "in the user's language." **Currently always `null`** — the Groq account backing this hasn't accepted the TTS model's usage terms yet; this is a real, not-yet-resolved gap, not a per-request failure. Safe to send `synthesize_audio: true` regardless — it degrades to `null`, never errors. |
 
 **Error responses** — see "Error handling" below.
+
+---
+
+### The disclaimer — always appended, never generated by the LLM
+
+Every `answer` (from both `/query` and `/query/stream`) ends with, verbatim:
+```
+\n\n*Disclaimer: This assistant provides source-grounded regulatory information for guidance and does not constitute formal legal advice.*
+```
+This satisfies SIH26045's problem statement requirement to "clearly state
+that it provides information and not legal advice." It's appended in code
+(`generation/prompts.py::append_disclaimer`) after the model finishes
+generating, the same way citations are attached — never requested from the
+LLM and hoped for, so it can't be silently dropped by a truncated
+generation. It's present **even on an abstention** (see the abstention
+example below) — there's no code path that skips it. If your UI renders
+Markdown, the `*...*` is intentional italic emphasis; if not, you'll see the
+literal asterisks — strip them client-side if that matters for your design,
+but don't strip the sentence itself.
+
+---
+
+### `new_or_non_classical_drug` — real captured example
+
+For a question about a genuinely new drug entity (not an established
+classical/proprietary/phytopharmaceutical category), `formulation_category`
+classifies as `new_or_non_classical_drug` and citations come from
+`NDCT_Rules_2019.pdf` (New Drugs and Clinical Trials Rules, 2019). Real
+captured output for `{"question": "What safety dossier is required for
+clinical trial permission of a new drug under the NDCT Rules?"}`,
+`time_total: 8.7s`:
+```json
+{
+  "answer": "The safety dossier that must be submitted with a clinical‑trial application for a new drug under the NDCT Rules includes:\n\n* **Non‑clinical toxicology data** – GLP‑compliant animal toxicology studies covering the standard safety endpoints required by the schedule...\n\n* **Clinical safety data** – tabulated safety information from the trial, with all adverse events classified by seriousness and assessed for causal relationship to the investigational drug.\n\nThese components together constitute the safety dossier required for permission to conduct the clinical trial.\n\n*Disclaimer: This assistant provides source-grounded regulatory information for guidance and does not constitute formal legal advice.*",
+  "citations": [
+    {"chunk_id": "NDCT_Rules_2019::p92::c159", "source_file": "NDCT_Rules_2019.pdf", "page_number": 92, "section_heading": "SECOND SCHEDULE"},
+    {"chunk_id": "NDCT_Rules_2019::p21::c28", "source_file": "NDCT_Rules_2019.pdf", "page_number": 21, "section_heading": "CHAPTER V"}
+  ],
+  "flags": {"abstained": false, "retried": false, "weak_grounding": false},
+  "formulation_category": "new_or_non_classical_drug",
+  "confidence_score": 0.9806081633976108,
+  "needs_clarification": false,
+  "clarifying_questions": [],
+  "audio_base64": null
+}
+```
+(citations array truncated above to 2 of 5 for brevity — the real response has 5)
 
 ---
 
@@ -169,10 +227,11 @@ data: {"text": " indication"}
 Concatenate `text` fields in arrival order to reconstruct the answer as
 it's typed, or just wait for `done` if you don't need a typing effect.)
 
-**`done`** — exactly one, always last on success:
+**`done`** — exactly one, always last on success. Real captured output for
+`{"question": "What is a geographical indication?"}`, `time_total: 8.1s`:
 ```json
 {
-  "answer": "A geographical indication is a sign that designates goods as originating from a particular territory, region or locality of a country, and that links those goods to specific ...",
+  "answer": "A geographical indication is a sign that designates goods as originating from a particular geographical environment—including its natural and human factors—and to the production, processing or preparation that takes place in that area. It may be applied to goods by being woven in, impressed on, worked into, annexed to or affixed to the goods or their packaging.\n\n*Disclaimer: This assistant provides source-grounded regulatory information for guidance and does not constitute formal legal advice.*",
   "citations": [
     {"chunk_id": "GI_Rules_2002::p9::c46", "source_file": "GI_Rules_2002.pdf", "page_number": 9, "section_heading": "Section 31. Deficiencies, clause (1)"},
     {"chunk_id": "GI_Rules_2002::p7::c30", "source_file": "GI_Rules_2002.pdf", "page_number": 7, "section_heading": "Section 23. Form and signing of application, clause (9)"},
@@ -180,13 +239,18 @@ it's typed, or just wait for `done` if you don't need a typing effect.)
   ],
   "flags": {"abstained": false, "retried": false, "weak_grounding": false},
   "formulation_category": "classical",
+  "confidence_score": 0.9994600051404637,
   "needs_clarification": false,
   "clarifying_questions": []
 }
 ```
 Same shape as `/query`'s response body, minus `audio_base64` (streaming
 never synthesizes audio — there's no `synthesize_audio` support on this
-endpoint yet).
+endpoint yet). **The disclaimer streams as one additional real `token`
+event** after the answer's own tokens end (not spliced into `done` only) —
+a client rendering tokens as they arrive sees it appear the same way the
+rest of the answer did, then `done.answer` already includes it, so you
+don't need to append it yourself either way.
 
 **`error`** — sent instead of `done` on failure, connection then closes:
 ```
@@ -265,10 +329,11 @@ It's a real boolean, always present in every response from both `/query`
 and `/query/stream`'s `done` event (not just abstentions — it's `false` on
 a normal answer).
 
-Real captured abstention example:
+Real captured abstention example, `{"question": "What is the capital of
+France?"}`, `time_total: 15.3s`:
 ```json
 {
-  "answer": "I could not find this in my sources.  \nCould you specify the source or document where the capital city of France is mentioned?",
+  "answer": "I could not find this in my sources.  \nWhich specific source or document should I refer to for information about the capital of the French Republic?\n\n*Disclaimer: This assistant provides source-grounded regulatory information for guidance and does not constitute formal legal advice.*",
   "citations": [],
   "flags": {
     "abstained": true,
@@ -276,6 +341,7 @@ Real captured abstention example:
     "weak_grounding": true
   },
   "formulation_category": "classical",
+  "confidence_score": 0.00005446697379103936,
   "needs_clarification": false,
   "clarifying_questions": [],
   "audio_base64": null
@@ -286,7 +352,10 @@ Note `weak_grounding: true` here too, on a genuinely out-of-scope question
 keyword overlap somewhere in the corpus even though nothing relevant
 actually exists, which is exactly the caveat in the field's description
 above. Check `abstained` for whether to show a "no answer" state;
-`weak_grounding` isn't a substitute for it.
+`weak_grounding` isn't a substitute for it. `confidence_score` is near zero
+here — a genuinely out-of-scope question is exactly the case it's meant to
+flag — but note the disclaimer is still appended even though the answer is
+an abstention.
 
 Secondary signal, if you want belt-and-suspenders: `citations` is always
 `[]` when `flags.abstained` is `true`. Don't rely on this alone — an
@@ -313,17 +382,22 @@ curl -X POST http://127.0.0.1:8123/query -H "Content-Type: application/json; cha
 Response `200`:
 ```json
 {
-  "answer": "भौगोलिक संकेत एक ऐसा चिन्ह है जो वस्तुओं को एक विशेष क्षेत्र, क्षेत्र या स्थान से उत्पन्न होने के रूप में निर्दिष्ट करता है...",
+  "answer": "भौगोलिक संकेत एक ऐसा चिन्ह है जो वस्तुओं को देश के एक विशिष्ट क्षेत्र, क्षेत्र या स्थान से उत्पन्न होने के रूप में निर्दिष्ट करता है, जो इंगित करता है कि वस्तुओं में विशेष गुणवत्ता है। प्रतिष्ठा या अन्य विशेषताएँ जो विशुद्ध रूप से या अनिवार्य रूप से भौगोलिक वातावरण-इसके प्राकृतिक और मानव कारकों सहित-के कारण होती हैं और जिनका उत्पादन, प्रसंस्करण या तैयारी उस परिभाषित क्षेत्र में होती है। अस्वीकरणः यह सहायक मार्गदर्शन हेतु स्रोत-आधारित नियामक जानकारी प्रदान करता है और औपचारिक कानूनी सलाह नहीं देता है।*",
   "citations": [
     {"chunk_id": "GI_Rules_2002::p9::c46", "source_file": "GI_Rules_2002.pdf", "page_number": 9, "section_heading": "Section 31. Deficiencies, clause (1)"}
   ],
   "flags": {"abstained": false, "retried": false, "weak_grounding": false},
   "formulation_category": "classical",
+  "confidence_score": 0.9994600051404637,
   "needs_clarification": false,
   "clarifying_questions": [],
   "audio_base64": null
 }
 ```
+Note the disclaimer sentence at the end of `answer` is translated into the
+request's `language` along with the rest of the answer — it goes through
+the same translation call, not appended after translation, so you'll never
+see it in English inside an otherwise-translated response.
 
 Retrieval and generation always run in English internally regardless of
 `language` — the question is translated to English before retrieval, the
@@ -355,18 +429,24 @@ guessing from `answer`'s script.
 
 ## Jurisdiction — India vs. international
 
-Real captured example, `jurisdiction: "international"`, `time_total: 6.3s`:
+Real captured example, `jurisdiction: "international"`, `time_total: 6.7s`:
 ```json
 {
-  "answer": "I could not find this in my sources.  \nCould you specify which aspect of the PCT filing process you need details on (e.g., initial filing, international search, national phase entry, etc.)?",
+  "answer": "I could not find this in my sources.  \nWhich specific stage or aspect of the PCT filing process (e.g., international application, publication, examination, or national phase entry) would you like detailed information about?\n\n*Disclaimer: This assistant provides source-grounded regulatory information for guidance and does not constitute formal legal advice.*",
   "citations": [],
   "flags": {"abstained": true, "retried": true, "weak_grounding": false},
   "formulation_category": "classical",
+  "confidence_score": 0.0,
   "needs_clarification": false,
   "clarifying_questions": [],
   "audio_base64": null
 }
 ```
+`confidence_score: 0.0` here specifically means the reranker never even ran
+— BM25/dense both returned zero candidates for `jurisdiction:
+"international"` (nothing indexed yet), not "the reranker looked and found
+nothing relevant" (which would still be a small positive float, as in the
+"What is the capital of France?" example above).
 This is **expected, current behavior** — `data/international/` has zero
 indexed documents right now (see that folder's README for what's planned:
 WIPO GRATK Treaty, Nagoya Protocol, Budapest Treaty, PCT). Every
@@ -389,13 +469,16 @@ curl -X POST http://127.0.0.1:8123/query -H "Content-Type: application/json" \
 
 ## Formulation clarification — `needs_clarification`
 
-Real captured example (`question` deliberately spans two categories):
+Real captured example (`question` deliberately spans two categories),
+`{"question": "Is a nutraceutical also a proprietary formulation
+product?"}`, `time_total: 8.2s`:
 ```json
 {
-  "answer": "I could not find this in my sources.  \nCould you specify which regulation or definition you are referring to when you mention \"proprietary formulation product\"?",
+  "answer": "I could not find this in my sources.  \nCould you specify which regulation or definition you are referring to when you ask if a nutraceutical is considered a proprietary formulation product?\n\n*Disclaimer: This assistant provides source-grounded regulatory information for guidance and does not constitute formal legal advice.*",
   "citations": [],
   "flags": {"abstained": true, "retried": false, "weak_grounding": false},
   "formulation_category": "ayurveda_aahar",
+  "confidence_score": 0.9146197193898428,
   "needs_clarification": true,
   "clarifying_questions": [
     "This question touches more than one formulation category — is it about an Ayurveda-Aahar / nutraceutical food product or a proprietary (P&P) medicine with a brand name and its own formulation? The answer below assumes Ayurveda-Aahar (Nutraceutical) unless you clarify."
