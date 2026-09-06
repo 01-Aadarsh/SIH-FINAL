@@ -10,7 +10,7 @@ Smart India Hackathon 2026, problem statement **SIH26045**, Ministry of Ayush.
 
 A user asks a question about Ayurveda-related IP or regulatory rules. The system retrieves relevant text from official Indian government documents and answers using only that text, showing exactly which document, page and section each answer came from. If the answer isn't in the documents, it says so instead of guessing.
 
-**Scope:** National (Indian) framework is what's actually indexed. International jurisdiction routing exists end to end (API field, DB column, per-jurisdiction BM25 index, dense-retrieval SQL filter) and correctly abstains rather than crashing or defaulting to Indian law — but `data/international/` has no documents in it yet (WIPO GRATK Treaty 2024, Nagoya Protocol, Budapest Treaty, PCT — see its README for what's expected and why none of it can be fabricated here). Treat "international" as scaffolded, not built.
+**Scope:** National (Indian) framework is the primary corpus. International jurisdiction routing (API field, DB column, per-jurisdiction BM25 index, dense-retrieval SQL filter) is now backed by real documents too — WIPO GRATK Treaty 2024, Nagoya Protocol, Budapest Treaty (full text + WIPO's own secretariat note), PCT full text, and a WIPO IGC mandate decision — see `data/international/README.md` for what's indexed and why nothing here is ever fabricated. It still correctly abstains, not crashes or defaults to Indian law, for anything genuinely outside that set (e.g. the IGC's deeper negotiating-history documents).
 
 ## Why the architecture is what it is
 
@@ -39,11 +39,10 @@ User query (+ jurisdiction: india | international, + language)
   → Answer + sources  |  or  Abstains
 ```
 
-`jurisdiction=international` currently abstains on every query — no
-international documents are indexed yet (`data/international/` is a
-placeholder, see its README). That's the correct behavior, not a bug: the
-alternative (silently falling back to Indian law, or crashing) would be
-worse than an honest "not found." BM25 is now genuinely partitioned per
+`jurisdiction=international` now answers for real, from 6 real documents
+in `data/international/` (see its README) — abstention still fires
+correctly for anything genuinely outside that set, rather than silently
+falling back to Indian law or crashing. BM25 is genuinely partitioned per
 jurisdiction (`ingestion/indexer.py::build_bm25` builds one BM25Okapi per
 jurisdiction, not one shared index post-filtered afterward) — the filter
 applies during retrieval, not as cleanup after.
@@ -119,17 +118,27 @@ against the live API both directions, including a Devanagari-script input
 other approximation).
 
 **TTS is opt-in on `/query`** (`QueryRequest.synthesize_audio`,
-`backend/api/tts.py`, Groq). English-only, always — Groq's TTS models
-(`canopylabs/orpheus-v1-english`, `canopylabs/orpheus-arabic-saudi`,
-confirmed by querying this project's own account) have no Indian-language
-voice, so it reads the pre-translation English answer regardless of
-`language`. **Not yet functional**: this Groq account hasn't accepted
+`backend/api/tts.py`, Sarvam AI's Bulbul model). Originally built on Groq
+(`canopylabs/orpheus-v1-english`) — **replaced**, not just left broken,
+for two compounding reasons: (1) Groq's TTS models are English-only, so
+even working it would read the pre-translation English answer regardless
+of `language`, wrong for exactly the multilingual case this project cares
+about; (2) this Groq account never accepted
 `canopylabs/orpheus-v1-english`'s model terms, which blocks even
-discovering a valid voice name — `GROQ_TTS_VOICE` is deliberately unset
-rather than guessed. `/query` degrades gracefully either way
-(`audio_base64: null`, never a failed request) — see `env.example.txt` for
-the one manual step (visit the Groq Playground, accept the terms, set
-`GROQ_TTS_VOICE`) that turns this on.
+discovering a valid voice name, and that's a manual step requiring org
+console access, not something fixable in code. Bulbul solves both:
+`SARVAM_API_KEY` (already required for translation) is sufficient — no
+separate key or manual approval — and it natively voices 11 of the
+languages `api/translation.py` already translates into (see
+`BULBUL_SUPPORTED_LANGUAGES`), so TTS now speaks the *translated* answer
+in the user's actual selected language, not a fallback to English.
+Languages Sarvam translates but Bulbul cannot voice (e.g. Sanskrit,
+Manipuri) skip audio rather than mis-voicing — same fail-open contract as
+translation. Verified against the live API in both English and Hindi
+(real, decodable WAV audio, ~3s and ~2s respectively for short test
+strings) — not assumed from docs alone. `/query` still degrades
+gracefully in every failure case (`audio_base64: null`, never a failed
+request).
 
 **Hierarchical statutory chunking** (`backend/ingestion/chunker.py::
 HierarchicalStatutoryChunker`) replaces the plain sliding-window chunker
@@ -180,6 +189,55 @@ generation still answers, using the first-matched category. Deliberately
 still not LLM-based, for the same reason as before: an LLM classifier here
 would reintroduce non-determinism one step earlier than the retry does.
 
+**Knowledge graph — first real slice of the PS's "stage 2"**
+(`backend/graph_kg/build_kg.py`, `kg.py`, wired into the graph as
+`expand_related_provisions_node`). A small graph over the corpus's own
+statutory tags (the same tag vocabulary `chunker.py::tag_statutory_metadata`
+already produces), with three edge types, each labeled honestly by how it
+was produced:
+
+1. `co_occurrence` — DATA-DERIVED. Two tags get an edge if they ever
+   appear together on the same real indexed chunk, counted directly from
+   the database. Nothing authored, nothing guessed.
+2. `category_tags` — REUSED, not new. `graph/formulation.py`'s already-
+   reviewed `CATEGORY_STATUTORY_TAGS` mapping, stored for the graph
+   lookup rather than duplicated.
+3. `cross_jurisdiction` — the one genuinely new piece of content: a small,
+   explicitly authored table (`CROSS_JURISDICTION_PAIRS`) pairing a
+   domestic tag with an international tag that covers the same real-world
+   regulatory concern — e.g. the domestic NBA-approval pathway
+   (`BDA_Sec6_NBA_Approval`) and the Nagoya Protocol's ABS Clearing-House
+   (`Nagoya_ABS_Clearing_House`); Section 3(p)'s domestic TK patent bar
+   and the WIPO GRATK Treaty's mandatory-disclosure and TK/genetic-
+   resources coverage. This is a STRUCTURAL claim ("these two already-
+   indexed, already-citable provisions are about the same topic"), never
+   new legal text, and — same as every other heuristic tag rule in this
+   codebase — a first pass a domain expert should review, not authoritative
+   cross-referencing. `build_kg.py` fails loudly if any pair references a
+   tag that doesn't actually exist in the live index, the same philosophy
+   as `indexer.py`'s chunk-metadata validation.
+
+Every tag resolves to one real example chunk from the live index, so a
+"related provision" is always a pointer to something actually retrievable
+and citable — never a bare tag name. Surfaced as `related_provisions` on
+both `/query` and `/query/stream` (cheap enough — no I/O, no LLM call — to
+include on the stream too, unlike translation/TTS which have a real
+technical reason to be `/query`-only). Verified end to end against the
+live corpus: a `jurisdiction: "india"` Section 3(p) question's
+`related_provisions` surfaces the WIPO GRATK Treaty's Article 1 and
+Article 3 as international counterparts — the PS's "jurisdiction switch
+keeps the two answer-sets visibly separate" requirement holds (`answer`/
+`citations` stay India-only), while the system can still *point* across
+jurisdictions where a real structural counterpart exists.
+
+**What this is not**: a full knowledge graph (no entity/relation
+extraction from free text, no reasoning over multi-hop paths beyond one
+lookup) or agentic orchestration (no LLM decides what to query next —
+this is a deterministic lookup, same "no LLM call where determinism
+matters more" reasoning as `graph/formulation.py`'s triage). Treat this as
+the first real increment toward the PS's stage-2 ask, not the finished
+thing.
+
 **Declined, not attempted**: fabricating the text of the Biological
 Diversity (Amendment) Act 2023, Biological Diversity Rules 2024, or the
 WIPO GRATK Treaty 2024 from memory to seed as corpus content. This system's
@@ -209,7 +267,7 @@ indexed as its own separate amendment-act document.
 | LLM primary | Groq API (`AsyncGroq`), direct — no local-first guessing/timeout on the live path |
 | LLM offline fallback | Ollama, local quantized model, gated behind `OFFLINE_MODE=true` — explicit operator flag for venue WiFi failure, not an auto-detected condition |
 | Translation | Sarvam AI, wired into `/query` (question in, answer out — see below). PS names Bhashini specifically — switch if a Bhashini key arrives before the demo. |
-| TTS | Groq (`canopylabs/orpheus-v1-english`), opt-in on `/query`, English-only. Not yet functional pending model-terms acceptance on the Groq account — see below. |
+| TTS | Sarvam AI (`bulbul:v3`), opt-in on `/query`, speaks 11 languages (not English-only) — see below. |
 | Frontend | React / Next.js |
 | Hosting | Render or Railway (backend, `Procfile` — `WEB_CONCURRENCY` workers, default 2: each worker loads its own copy of the embedding + cross-encoder models in memory, so raise it only if the host has RAM to match), Vercel (frontend) |
 
@@ -232,15 +290,16 @@ ip-sakti/
 │   ├── retrieval/        bm25_search.py, dense_search.py, fusion.py, reranker.py
 │   ├── generation/       prompts.py, llm_client.py, citation.py
 │   ├── graph/            state.py, nodes.py, build_graph.py, formulation.py
+│   ├── graph_kg/         build_kg.py, kg.py — knowledge-graph enrichment (related_provisions)
 │   ├── api/              main.py, translation.py, tts.py, text_chunking.py
-│   ├── tests/            test_retrieval_determinism.py (pytest)
+│   ├── tests/            test_retrieval_determinism.py, test_knowledge_graph.py, etc. (pytest)
 │   ├── pytest.ini
 │   ├── Procfile          multi-worker launch command (Render/Railway)
 │   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
 ├── data/                 India-jurisdiction source PDFs (gitignored)
-│   └── international/    international-jurisdiction PDFs (gitignored, placeholder — see its README)
+│   └── international/    international-jurisdiction PDFs (gitignored — see its README for what's indexed)
 └── docs/
 ```
 
@@ -257,11 +316,13 @@ Parallel: data collection, frontend (against mock responses), presentation.
 - Every chunk carries `source_file`, `page_number`, `section_heading`, `chunk_id`. If any is missing, citations break — validate, don't paper over it.
 - The BM25 tokenizer used at index time and query time must be identical. If they drift, BM25 silently stops matching. It currently lives in `ingestion/indexer.py::tokenize` — import it, don't rewrite it.
 - The BM25 pickle stores `chunk_ids` in the same order as the corpus. Score positions map back to ids by index.
-- Never commit `.env`, PDFs, or the BM25 pickle.
 - Test each module standalone (`python -m ingestion.chunker <pdf>`) before wiring the next one.
 - Prefer failing loudly over silently returning empty results.
 - Every retrieval/generation function that does I/O (LLM calls, pgvector queries) is `async def`. If you add a new one, make it async too — a sync blocking call anywhere in this chain stalls the whole event loop, not just its own request.
 - `jurisdiction` ("india" or "international") is the single source of truth in `ingestion/indexer.py::JURISDICTIONS` — the DB `CHECK` constraint, `QueryRequest.jurisdiction`'s pydantic `Literal`, and `loader.py`'s folder tagging must all agree with it.
+- Never commit `.env`, PDFs, the BM25 pickle, or `indexes/knowledge_graph.json`.
+- Re-run `python -m graph_kg.build_kg` after any `ingestion.indexer` run that changes tagging (a new `chunker.py` rule, a new document) — it reads the live `statutory_tags` column, so it drifts from reality otherwise. Not run automatically as part of the indexer, by choice: ingestion should stay focused on what it already does; a separate command matches this repo's existing "test each module standalone" convention.
+- Adding a pair to `graph_kg/build_kg.py::CROSS_JURISDICTION_PAIRS` requires both tags to already exist in the live index — `build()` fails loudly otherwise. Don't add a pair speculatively before its source document is actually indexed.
 
 ## Demo requirements
 
