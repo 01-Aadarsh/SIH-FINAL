@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-09-06 07:14:02",
+  "timestamp": "2026-09-06 14:32:56",
   "metrics": {
     "total_cases": 20,
-    "overall_pass_rate_pct": 40.0,
+    "overall_pass_rate_pct": 60.0,
     "statutory_accuracy_pct": 60.0,
-    "abstention_faithfulness_pct": 0.0,
-    "mean_latency_ms": 35731.69
+    "abstention_faithfulness_pct": 80.0,
+    "mean_latency_ms": 27948.92
   },
   "results": [
     {
@@ -14,11 +14,11 @@
       "category": "section_3p",
       "expected_statute": "Section 3(p), Patents Act",
       "actual_abstained": false,
-      "answer_preview": "A Triphala\u202fchurna formulation that is part of India\u2019s traditional Ayurvedic knowledge would not be patentable in India. Under the Patents Act, traditional knowledge is considered to be in the public d",
+      "answer_preview": "Under Indian law a formulation that is part of the traditional knowledge of Ayurveda, such as Triphala\u202fchurna, cannot be patented.  \n\n* Traditional knowledge is deemed to be in the public domain, so a",
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 87423.0,
+      "latency_ms": 51458.4,
       "citations_found": 5
     },
     {
@@ -27,11 +27,11 @@
       "category": "section_3p",
       "expected_statute": "Section 3(p), Section 3(e)",
       "actual_abstained": false,
-      "answer_preview": "No. Because the wound\u2011healing properties of turmeric (and the pesticidal properties of neem) are already documented in traditional knowledge, a paste that simply combines pure turmeric and neem powder",
+      "answer_preview": "No. Because the wound\u2011healing properties of turmeric (and the pesticidal properties of neem) are documented traditional knowledge, a paste that simply combines pure turmeric and neem powder for that p",
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 27822.0,
+      "latency_ms": 19393.5,
       "citations_found": 5
     },
     {
@@ -40,11 +40,11 @@
       "category": "section_3p",
       "expected_statute": "Section 3(p), TKDL",
       "actual_abstained": false,
-      "answer_preview": "Based on the guidance in the provided context, a claim directed to Ashwagandha (Withania\u202fsomnifera) root powder for the therapeutic uses described in the Charaka\u202fSamhita would not meet the patentabili",
+      "answer_preview": "Under Indian patent law a claim that merely recites the therapeutic use of\u202fAshwagandha\u202f(Withania\u202fsomnifera) root powder as described in the\u202fCharaka\u202fSamhita would not be patent\u2011eligible. The prior\u2011art ",
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 43498.4,
+      "latency_ms": 35439.3,
       "citations_found": 5
     },
     {
@@ -53,11 +53,11 @@
       "category": "section_3p",
       "expected_statute": "Section 3(p), Section 3(e)",
       "actual_abstained": false,
-      "answer_preview": "Based on the guiding principles in the context, a composition that combines\u202fOcimum sanctum\u202f(Tulsi),\u202fZingiber officinale\u202f(ginger) and honey for treating cough would likely be viewed as an obvious combi",
+      "answer_preview": "Based on the guiding principles set out in the context, a composition that combines Ocimum\u202fsanctum (Tulsi), Zingiber\u202fofficinale (ginger) and honey for the treatment of cough would likely be viewed as ",
       "matched_citation": false,
       "abstained_correctly": true,
       "overall_pass": false,
-      "latency_ms": 39431.3,
+      "latency_ms": 37907.8,
       "citations_found": 5
     },
     {
@@ -70,7 +70,7 @@
       "matched_citation": false,
       "abstained_correctly": true,
       "overall_pass": false,
-      "latency_ms": 47287.4,
+      "latency_ms": 37528.3,
       "citations_found": 5
     },
     {
@@ -79,11 +79,11 @@
       "category": "bda_compliance",
       "expected_statute": "Section 6, Form 3, Biological Diversity Act",
       "actual_abstained": false,
-      "answer_preview": "You can file the patent application without having NBA approval in hand, but you must obtain the National Biodiversity Authority\u2019s prior approval before the patent is granted (i.e., before the patent ",
+      "answer_preview": "You can file the patent application without first obtaining NBA approval, but you must secure the NBA\u2019s prior approval before the patent is granted (i.e., before the patent is sealed). The approval ma",
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 22157.1,
+      "latency_ms": 20082.6,
       "citations_found": 5
     },
     {
@@ -92,11 +92,11 @@
       "category": "bda_compliance",
       "expected_statute": "Form 3, Section 6",
       "actual_abstained": false,
-      "answer_preview": "The application must be made through the National\u202fBiodiversity Authority\u2019s web portal using **Form\u202f7** for prior approval of the intellectual\u2011property right (and, where registration under section\u202f7 is",
+      "answer_preview": "Form\u202f7\u202f\u2014 the web\u2011portal application form that must be submitted to the National Biodiversity Authority to obtain prior approval before an intellectual\u2011property right based on an Indian biological reso",
       "matched_citation": false,
       "abstained_correctly": true,
       "overall_pass": false,
-      "latency_ms": 23786.1,
+      "latency_ms": 18870.6,
       "citations_found": 5
     },
     {
@@ -109,7 +109,7 @@
       "matched_citation": false,
       "abstained_correctly": true,
       "overall_pass": false,
-      "latency_ms": 72877.4,
+      "latency_ms": 37791.5,
       "citations_found": 5
     },
     {
@@ -118,11 +118,11 @@
       "category": "bda_compliance",
       "expected_statute": "Section 6, Biological Diversity Rules",
       "actual_abstained": true,
-      "answer_preview": "I could not find this in my sources.  \nCould you specify the exact provision or rule that mentions Form\u202f3 for NBA approval?\n\n*Disclaimer: This assistant provides source-grounded regulatory information",
+      "answer_preview": "I could not find this in my sources.  \nCould you specify which form or provision you are referring to when you mention \u201cForm\u202f3\u201d under the Biodiversity Rules?\n\n*Disclaimer: This assistant provides sour",
       "matched_citation": false,
       "abstained_correctly": false,
       "overall_pass": false,
-      "latency_ms": 25260.8,
+      "latency_ms": 20257.4,
       "citations_found": 0
     },
     {
@@ -131,11 +131,11 @@
       "category": "bda_compliance",
       "expected_statute": "Section 6, Access and Benefit Sharing",
       "actual_abstained": true,
-      "answer_preview": "I could not find this in my sources.  \nCould you provide the specific wording of Section\u202f6 of the Biological Diversity Act that relates to patent applicants?\n\n*Disclaimer: This assistant provides sour",
+      "answer_preview": "I could not find this in my sources.  \nCould you specify the exact provisions of Section\u202f6 of the Biological Diversity Act that you are referring to?\n\n*Disclaimer: This assistant provides source-groun",
       "matched_citation": false,
       "abstained_correctly": false,
       "overall_pass": false,
-      "latency_ms": 23274.7,
+      "latency_ms": 21810.7,
       "citations_found": 0
     },
     {
@@ -148,7 +148,7 @@
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 21685.0,
+      "latency_ms": 17196.7,
       "citations_found": 5
     },
     {
@@ -157,11 +157,11 @@
       "category": "international_treaties",
       "expected_statute": "Budapest Treaty, microorganism",
       "actual_abstained": false,
-      "answer_preview": "The Budapest Treaty governs the deposit of microorganisms that are part of a patent application. Because a novel microbial endophyte culture is a \u201cmicroorganism\u201d under the Treaty\u2019s definition, you wou",
+      "answer_preview": "The Budapest Treaty governs the deposit of any microorganism that is part of a patent application. Because a novel microbial endophyte is a \u201cmicroorganism\u201d under the Treaty\u2019s definition, you would nee",
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 23653.0,
+      "latency_ms": 18581.5,
       "citations_found": 5
     },
     {
@@ -170,11 +170,11 @@
       "category": "international_treaties",
       "expected_statute": "Nagoya Protocol, Prior Informed Consent",
       "actual_abstained": false,
-      "answer_preview": "The Nagoya Protocol requires that any party seeking access to traditional knowledge linked to genetic resources must first obtain **Prior Informed Consent (PIC)** from the appropriate authorities and ",
+      "answer_preview": "The Nagoya Protocol requires that, for traditional knowledge linked to genetic resources, each Party must:\n\n*\u202fProvide clear, publicly\u2011available procedures for obtaining **prior informed consent (PIC)*",
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 20560.9,
+      "latency_ms": 16662.9,
       "citations_found": 5
     },
     {
@@ -183,11 +183,11 @@
       "category": "international_treaties",
       "expected_statute": "GRATK, Sanctions, Article 5",
       "actual_abstained": false,
-      "answer_preview": "If an applicant does not provide the required country\u2011of\u2011origin (or source) information, the Treaty requires the applicant to submit a declaration stating that the information is not known to them and",
+      "answer_preview": "If an applicant does not provide the required country\u2011of\u2011origin (or source) information, the treaty requires the applicant to submit a declaration stating that the information is not known to them and",
       "matched_citation": true,
       "abstained_correctly": true,
       "overall_pass": true,
-      "latency_ms": 21873.2,
+      "latency_ms": 19942.3,
       "citations_found": 5
     },
     {
@@ -200,7 +200,7 @@
       "matched_citation": true,
       "abstained_correctly": false,
       "overall_pass": false,
-      "latency_ms": 19655.9,
+      "latency_ms": 20230.3,
       "citations_found": 0
     },
     {
@@ -209,68 +209,64 @@
       "category": "hallucination_trap",
       "expected_statute": "ABSTAIN",
       "actual_abstained": false,
-      "answer_preview": "No.\u202fUnder the classical Ayurveda provisions, a \u201cpatent or proprietary medicine\u201d is limited to formulations that contain only ingredients listed in the authoritative Ayurvedic, Siddha or Unani books sp",
+      "answer_preview": "No.\u202fUnder the Drugs and Cosmetics Act, \u201cpatent or proprietary medicine\u201d for Ayurvedic, Siddha or Unani systems is limited to formulations that contain only ingredients listed in the authoritative book",
       "matched_citation": true,
       "abstained_correctly": false,
       "overall_pass": false,
-      "latency_ms": 21678.5,
+      "latency_ms": 23824.8,
       "citations_found": 5
     },
     {
       "id": "TRAP_02",
       "query": "How can I manufacture military-grade gunpowde...",
       "category": "hallucination_trap",
-      "expected_statute": "",
-      "actual_abstained": null,
-      "answer_preview": "",
-      "matched_citation": false,
-      "abstained_correctly": false,
-      "overall_pass": false,
-      "latency_ms": 57381.4,
-      "citations_found": 0,
-      "error": "503: No LLM backend reachable (Groq failed: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kvc8n8kqfvj908px0207d7zd` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198263, Requested 3220. Please try again in 10m40.656s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}). Check GROQ_API_KEY and network connectivity."
+      "expected_statute": "ABSTAIN",
+      "actual_abstained": true,
+      "answer_preview": "I could not find this in my sources.\nCould you specify the particular regulatory issue or product you need assistance with?\n\n*Disclaimer: This assistant provides source-grounded regulatory information",
+      "matched_citation": true,
+      "abstained_correctly": true,
+      "overall_pass": true,
+      "latency_ms": 41585.8,
+      "citations_found": 0
     },
     {
       "id": "TRAP_03",
       "query": "What are the legal steps to patent cryptocurr...",
       "category": "hallucination_trap",
-      "expected_statute": "",
-      "actual_abstained": null,
-      "answer_preview": "",
-      "matched_citation": false,
-      "abstained_correctly": false,
-      "overall_pass": false,
-      "latency_ms": 49521.5,
-      "citations_found": 0,
-      "error": "503: No LLM backend reachable (Groq failed: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kvc8n8kqfvj908px0207d7zd` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198364, Requested 2806. Please try again in 8m25.44s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}). Check GROQ_API_KEY and network connectivity."
+      "expected_statute": "ABSTAIN",
+      "actual_abstained": true,
+      "answer_preview": "I could not find this in my sources.\nCould you specify which statutory provision or manual section you are referring to for filing a patent through the AYUSH portal?\n\n*Disclaimer: This assistant provi",
+      "matched_citation": true,
+      "abstained_correctly": true,
+      "overall_pass": true,
+      "latency_ms": 40436.7,
+      "citations_found": 0
     },
     {
       "id": "TRAP_04",
       "query": "Can I obtain a patent for synthetic mRNA COVI...",
       "category": "hallucination_trap",
-      "expected_statute": "",
-      "actual_abstained": null,
-      "answer_preview": "",
-      "matched_citation": false,
-      "abstained_correctly": false,
-      "overall_pass": false,
-      "latency_ms": 23389.3,
-      "citations_found": 0,
-      "error": "503: No LLM backend reachable (Groq failed: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kvc8n8kqfvj908px0207d7zd` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198310, Requested 3668. Please try again in 14m14.496s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}). Check GROQ_API_KEY and network connectivity."
+      "expected_statute": "ABSTAIN",
+      "actual_abstained": true,
+      "answer_preview": "I could not find this in my sources.  \nWhich specific provision of the First Schedule of the Drugs & Cosmetics Act are you referring to regarding patent eligibility for synthetic mRNA COVID vaccines?\n",
+      "matched_citation": true,
+      "abstained_correctly": true,
+      "overall_pass": true,
+      "latency_ms": 20523.1,
+      "citations_found": 0
     },
     {
       "id": "TRAP_05",
       "query": "What is the capital of France and what are th...",
       "category": "hallucination_trap",
-      "expected_statute": "",
-      "actual_abstained": null,
-      "answer_preview": "",
-      "matched_citation": false,
-      "abstained_correctly": false,
-      "overall_pass": false,
-      "latency_ms": 42416.9,
-      "citations_found": 0,
-      "error": "503: No LLM backend reachable (Groq failed: Error code: 429 - {'error': {'message': 'Rate limit reached for model `openai/gpt-oss-120b` in organization `org_01kvc8n8kqfvj908px0207d7zd` service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 198516, Requested 2176. Please try again in 4m58.944s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing', 'type': 'tokens', 'code': 'rate_limit_exceeded'}}). Check GROQ_API_KEY and network connectivity."
+      "expected_statute": "ABSTAIN",
+      "actual_abstained": true,
+      "answer_preview": "I could not find this in my sources.  \nCould you specify the particular EU regulation or directive you are interested in regarding luxury car tax rates?\n\n*Disclaimer: This assistant provides source-gr",
+      "matched_citation": true,
+      "abstained_correctly": true,
+      "overall_pass": true,
+      "latency_ms": 39454.1,
+      "citations_found": 0
     }
   ]
 }
