@@ -1,6 +1,7 @@
 "use client";
 
 import type { FormCard } from "@/lib/types";
+import { API_BASE_URL } from "@/lib/api";
 
 /** Full-detail view of one compliance/form_navigator.py catalog match,
  * opened by clicking its ActionableFormCard. Same underlying data as the
@@ -97,6 +98,16 @@ export function ActionableFormModal({
         >
           Go to official submission portal →
         </a>
+        <a
+          href={`${API_BASE_URL}/api/v1/compliance/forms/${form.form_id}/download`}
+          className="mt-2 block rounded-xl border border-clay-200 px-4 py-2.5 text-center text-sm font-semibold text-ink/70 transition hover:border-forest-300 hover:bg-forest-50 hover:text-forest-700"
+        >
+          Download prep checklist (.docx)
+        </a>
+        <p className="mt-1.5 text-center text-[11px] text-ink/40">
+          A cover sheet with these details filled in — not the official
+          form itself.
+        </p>
       </div>
     </div>
   );

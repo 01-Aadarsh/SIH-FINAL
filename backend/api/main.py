@@ -41,7 +41,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import io
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -55,7 +57,8 @@ from pydantic import BaseModel, Field
 from api.asr import UnsupportedAudioFormat, transcribe_audio
 from api.translation import TARGET_LANGUAGE_CODES, translate_text
 from api.tts import BULBUL_SUPPORTED_LANGUAGES, synthesize_speech
-from compliance.form_navigator import match_forms
+from compliance.form_generator import UnknownFormId, generate_form_docx
+from compliance.form_navigator import FORM_CATALOG, match_forms
 from generation.citation import attach_citations, is_abstention
 from generation.compliance_flags import flag_compliance_checkpoints
 from generation.llm_client import astream_generate
@@ -63,7 +66,7 @@ from generation.prompts import append_disclaimer
 from graph.build_graph import build_graph
 from graph.nodes import expand_related_provisions_node, rewrite_query, run_retrieval_stage
 from graph.state import DEFAULT_FLAGS
-from ingestion.indexer import run as run_ingestion
+from ingestion.indexer import connect_async, run as run_ingestion
 
 load_dotenv(override=True)
 
@@ -96,6 +99,57 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
 SOURCE_SEARCH_DIRS = [DATA_DIR, DATA_DIR / "international"]
 
+_graph = None
+
+
+def _get_graph():
+    """Build and cache the compiled graph once, reused across requests."""
+    global _graph
+    if _graph is None:
+        _graph = build_graph()
+    return _graph
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """
+    Eager warm-up at process startup, not lazy on whoever's first request
+    happens to land — the concrete fix for "the first query is slow or
+    outright fails, and an identical retry succeeds": that symptom had two
+    real causes previously paid for by the first requester instead of by
+    startup:
+      1. retrieval/dense_search.py's SentenceTransformer and
+         retrieval/reranker.py's CrossEncoder are both lazy singletons —
+         loading either from disk takes real, measured seconds the first
+         time and is free every time after. Both are forced to load here.
+      2. ingestion/indexer.py::connect_async's own transient-DNS retry (see
+         its docstring) now gets its retries spent here, against no one's
+         patience, instead of against a live user's first question.
+    A warm-up failure is logged, not fatal — the app still starts and
+    serves requests normally; each of these would otherwise just lazy-load
+    (and retry) on the first real request anyway, same as before this
+    existed.
+    """
+    try:
+        await run_in_threadpool(_get_graph)
+        from retrieval.dense_search import _get_model as _get_dense_model
+        from retrieval.reranker import _get_model as _get_reranker_model
+
+        await run_in_threadpool(_get_dense_model)
+        await run_in_threadpool(_get_reranker_model)
+
+        conn = await connect_async()
+        await conn.close()
+        log.info("Startup warm-up complete: graph, embedding model, reranker, DB connection.")
+    except Exception:
+        log.exception(
+            "Startup warm-up failed — the app will still serve requests, "
+            "but the first real query may pay the warm-up cost (and retry) "
+            "that this step exists to avoid."
+        )
+    yield
+
+
 app = FastAPI(
     title="IP-SAKTI Sahayak API",
     description=(
@@ -109,6 +163,7 @@ app = FastAPI(
         "data/international/README.md)."
     ),
     version="0.2.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -117,16 +172,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-_graph = None
-
-
-def _get_graph():
-    """Build and cache the compiled graph once, reused across requests."""
-    global _graph
-    if _graph is None:
-        _graph = build_graph()
-    return _graph
 
 
 class ChatTurn(BaseModel):
@@ -914,3 +959,36 @@ def compliance_forms(
     jurisdiction: Literal["india", "international"] = "india",
 ):
     return {"forms": match_forms(intent=intent, jurisdiction=jurisdiction)}
+
+
+@app.get(
+    "/api/v1/compliance/forms/{form_id}/download",
+    summary="Download a fillable cover-sheet .docx for one form",
+    description=(
+        "Generates a .docx (compliance/form_generator.py) from the exact "
+        "FORM_CATALOG entry for `form_id` — title, statutory mandate, "
+        "submission portal, required attachments, and deadline, with "
+        "blank fields for applicant details. Not the official government "
+        "form itself (the document says so, and links to the real "
+        "submission portal) — a preparation checklist, since this catalog "
+        "doesn't reproduce the actual multi-page government form layouts. "
+        "`form_id` is one of the ids returned by /api/v1/compliance/forms "
+        "or a QueryResponse's `actionable_forms`, e.g. `NBA_FORM_7`."
+    ),
+    responses={404: {"description": "No form with that form_id in the catalog."}},
+)
+def download_compliance_form(form_id: str):
+    try:
+        docx_bytes = generate_form_docx(form_id)
+    except UnknownFormId:
+        valid_ids = ", ".join(f["form_id"] for f in FORM_CATALOG)
+        raise HTTPException(
+            status_code=404,
+            detail=f"No form with id {form_id!r}. Valid ids: {valid_ids}.",
+        )
+
+    return StreamingResponse(
+        io.BytesIO(docx_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{form_id}.docx"'},
+    )

@@ -504,7 +504,29 @@ question risks a weaker answer than the system is actually capable of.
   matches a question to the real NBA/IPO form it needs next (form
   numbers verified against the actual indexed Biological Diversity Rules,
   2024 text, not assumed), surfaced as `actionable_forms` on `/query`
-  and via `GET /api/v1/compliance/forms`
+  and via `GET /api/v1/compliance/forms` — each matched form is also
+  downloadable as a fillable .docx prep checklist
+  (`backend/compliance/form_generator.py`,
+  `GET /api/v1/compliance/forms/{form_id}/download`), built only from
+  that same catalog's real fields (title, statutory mandate, portal,
+  attachments, deadline) — never an invented fee or field
+- Compliance-checkpoint flags (`backend/generation/compliance_flags.py`)
+  — deterministic, generic pointers at compliance checkpoints the
+  *actually cited* chunks touch (e.g. Section 3(p), NBA approval, TKDL),
+  surfaced as `compliance_flags` on `/query` and `/query/stream`.
+  Deliberately never asserts a fee/timeline/percentage not already in the
+  cited text — see its module docstring for the fabricated-facts draft
+  this replaced
+- Startup warm-up (`backend/api/main.py`'s `lifespan` handler) — the
+  embedding model, cross-encoder, LangGraph, and one DB connection are
+  all forced to load at process startup rather than lazily on whoever's
+  first request happens to land. Fixes a real, reproduced symptom: the
+  first query after a cold start used to pay for both model-loading
+  latency and a transient DNS hiccup in `ingestion/indexer.py::
+  connect_async` (Windows-specific asyncio behavior — see that function's
+  docstring), occasionally failing outright with a retry succeeding right
+  after. Verified: first request post-restart now completes in ~9s (pure
+  LLM latency), not a failure
 - Offline evaluation harness (`backend/scripts/evaluate_pipeline.py` +
   `data/eval_benchmark.json`) — runs curated queries against the live
   pipeline, reports citation precision, abstention faithfulness, and
