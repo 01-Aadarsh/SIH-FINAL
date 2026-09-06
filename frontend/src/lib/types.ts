@@ -85,6 +85,18 @@ export interface QueryRequest {
   synthesize_audio?: boolean;
 }
 
+/** The /query/stream `done` SSE event's payload — identical to
+ * QueryResponse except audio_base64, which the streaming endpoint never
+ * returns at all (see docs/API_CONTRACT.md: "streaming never synthesizes
+ * audio — there's no synthesize_audio support on this endpoint"). */
+export type StreamDoneData = Omit<QueryResponse, "audio_base64">;
+
+/** POST /api/v1/voice/transcribe's response shape (backend/api/main.py). */
+export interface TranscribeResponse {
+  transcript: string;
+  detected_language: string;
+}
+
 /** One entry in the on-screen conversation — a superset of ChatTurn that also
  * carries the full response so the UI can render each turn correctly. */
 export interface ConversationMessage {
