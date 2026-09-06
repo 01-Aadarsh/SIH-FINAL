@@ -64,6 +64,16 @@ export interface FormCard {
   deadline: string;
 }
 
+/** A compliance-checkpoint pointer (generation/compliance_flags.py) — a
+ * short, deliberately generic note naming which already-cited chunk it
+ * relates to. Never a fee/timeline/percentage not already in that
+ * citation's own text — this is a highlighting layer over real cited
+ * content, not a second source of facts. */
+export interface ComplianceFlag {
+  tag: string;
+  note: string;
+}
+
 export interface QueryResponse {
   answer: string;
   citations: Citation[];
@@ -75,6 +85,7 @@ export interface QueryResponse {
   needs_clarification: boolean;
   clarifying_questions: string[];
   actionable_forms: FormCard[];
+  compliance_flags: ComplianceFlag[];
 }
 
 export interface QueryRequest {
@@ -113,6 +124,7 @@ export interface ConversationMessage {
   needs_clarification?: boolean;
   clarifying_questions?: string[];
   actionable_forms?: FormCard[];
+  compliance_flags?: ComplianceFlag[];
   /** Set when this assistant turn failed outright (network/5xx/422) instead
    * of returning a QueryResponse — rendered as an error bubble, never sent
    * back to the backend as history. */

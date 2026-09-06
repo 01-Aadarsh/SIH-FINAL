@@ -33,7 +33,7 @@ DOCUMENTED_REQUEST_FIELDS = {"question", "history", "jurisdiction", "language", 
 DOCUMENTED_RESPONSE_FIELDS = {
     "answer", "citations", "flags", "formulation_category", "confidence_score",
     "needs_clarification", "clarifying_questions", "audio_base64", "related_provisions",
-    "actionable_forms",
+    "actionable_forms", "compliance_flags",
 }
 DOCUMENTED_FLAGS_FIELDS = {"abstained", "retried", "weak_grounding"}
 

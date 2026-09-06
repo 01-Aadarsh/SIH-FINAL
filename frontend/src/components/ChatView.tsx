@@ -103,6 +103,7 @@ export function ChatView({
               needs_clarification: data.needs_clarification,
               clarifying_questions: data.clarifying_questions,
               actionable_forms: data.actionable_forms,
+              compliance_flags: data.compliance_flags,
               pending: false,
             }
           : m

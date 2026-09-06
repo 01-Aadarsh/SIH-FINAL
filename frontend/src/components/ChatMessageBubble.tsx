@@ -4,6 +4,7 @@ import { AbstentionBanner } from "./AbstentionBanner";
 import { ConfidenceBadge } from "./ConfidenceBadge";
 import { RelatedProvisionCard } from "./RelatedProvisionCard";
 import { ActionableFormCard } from "./ActionableFormCard";
+import { ComplianceFlags } from "./ComplianceFlags";
 
 export function ChatMessageBubble({
   message,
@@ -110,6 +111,10 @@ export function ChatMessageBubble({
             ))}
           </div>
         )}
+
+      {!isUser && !abstained && (
+        <ComplianceFlags flags={message.compliance_flags ?? []} />
+      )}
     </div>
   );
 }

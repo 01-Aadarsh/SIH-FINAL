@@ -57,6 +57,7 @@ from api.translation import TARGET_LANGUAGE_CODES, translate_text
 from api.tts import BULBUL_SUPPORTED_LANGUAGES, synthesize_speech
 from compliance.form_navigator import match_forms
 from generation.citation import attach_citations, is_abstention
+from generation.compliance_flags import flag_compliance_checkpoints
 from generation.llm_client import astream_generate
 from generation.prompts import append_disclaimer
 from graph.build_graph import build_graph
@@ -240,6 +241,17 @@ class FormCard(BaseModel):
     deadline: str
 
 
+class ComplianceFlag(BaseModel):
+    """One compliance-checkpoint pointer — see
+    generation/compliance_flags.py. `tag` names the statutory tag (also
+    visible on whichever citation carries it); `note` is a short, generic
+    sentence, never a specific fee/timeline/percentage not already in that
+    citation's own text."""
+
+    tag: str
+    note: str
+
+
 class QueryResponse(BaseModel):
     answer: str = Field(
         description=(
@@ -334,6 +346,19 @@ class QueryResponse(BaseModel):
             "retrieval already follows. First-pass reference data, not "
             "verified against live government sources on every field — see "
             "compliance/form_navigator.py's module docstring."
+        ),
+    )
+    compliance_flags: list[ComplianceFlag] = Field(
+        default_factory=list,
+        description=(
+            "Generic pointers (generation/compliance_flags.py) at "
+            "compliance checkpoints the *actually cited* chunks touch — e.g. "
+            "the Section 3(p) traditional-knowledge bar or the Biological "
+            "Diversity Act's NBA-approval requirement. Deterministic, no LLM "
+            "call, and deliberately does not assert any fee/timeline/"
+            "percentage not already in the cited text — each note just "
+            "names which citation above backs it. Always `[]` on abstention, "
+            "same rule as citations/actionable_forms/related_provisions."
         ),
     )
 
@@ -549,6 +574,7 @@ async def run_query(
             statutory_tags=chunk_tags,
         )
     )
+    compliance_flags = [] if flags.get("abstained") else flag_compliance_checkpoints(chunk_tags)
 
     return QueryResponse(
         answer=translated_answer,
@@ -561,6 +587,7 @@ async def run_query(
         audio_base64=audio_base64,
         related_provisions=result.get("related_provisions") or [],
         actionable_forms=actionable_forms,
+        compliance_flags=compliance_flags,
     )
 
 
@@ -676,6 +703,7 @@ async def query_stream(req: QueryRequest):
                     statutory_tags=chunk_tags,
                 )
             )
+            compliance_flags = [] if abstained else flag_compliance_checkpoints(chunk_tags)
 
             # The disclaimer streams as one more real token event — not
             # silently spliced into the `done` payload only — so a client
@@ -697,6 +725,7 @@ async def query_stream(req: QueryRequest):
                     "clarifying_questions": retrieval_state["clarifying_questions"],
                     "related_provisions": related_provisions,
                     "actionable_forms": actionable_forms,
+                    "compliance_flags": compliance_flags,
                 },
             )
         except asyncio.TimeoutError:
