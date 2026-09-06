@@ -14,6 +14,7 @@ function ChatPageContent() {
   const searchParams = useSearchParams();
   const jurisdictionParam = searchParams.get("jurisdiction");
   const category = searchParams.get("category") || null;
+  const language = searchParams.get("language") || "en-IN";
 
   useEffect(() => {
     if (!isJurisdiction(jurisdictionParam)) {
@@ -29,6 +30,7 @@ function ChatPageContent() {
     <ChatView
       jurisdiction={jurisdictionParam}
       category={category}
+      language={language}
       onChangeContext={() => router.push("/")}
     />
   );

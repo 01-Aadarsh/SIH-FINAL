@@ -179,7 +179,7 @@ def _build_messages(user_prompt: str, system_prompt: str | None) -> list[dict]:
     return messages
 
 
-async def _ollama_options() -> dict:
+def _ollama_options() -> dict:
     options = {"temperature": 0.0}
     if OLLAMA_NUM_GPU >= 0:
         options["num_gpu"] = OLLAMA_NUM_GPU
@@ -197,7 +197,7 @@ async def acomplete(user_prompt: str, system_prompt: str | None = None) -> str:
         try:
             client = _get_ollama_client()
             response = await client.chat(
-                model=OLLAMA_MODEL, messages=messages, options=await _ollama_options()
+                model=OLLAMA_MODEL, messages=messages, options=_ollama_options()
             )
             log.info("Ollama answered in %.1fs", time.monotonic() - t0)
             return response["message"]["content"].strip()
@@ -251,10 +251,10 @@ async def _stream_groq(messages: list[dict]) -> AsyncIterator[str]:
             f"All {len(GROQ_API_KEYS)} configured Groq key(s) rate-limited: {last_exc}"
         ) from last_exc
 
-    aiter = stream.__aiter__()
+    stream_iter = stream.__aiter__()
     while True:
         try:
-            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=STREAM_CHUNK_TIMEOUT)
+            chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=STREAM_CHUNK_TIMEOUT)
         except StopAsyncIteration:
             return
         delta = chunk.choices[0].delta.content
@@ -265,12 +265,12 @@ async def _stream_groq(messages: list[dict]) -> AsyncIterator[str]:
 async def _stream_ollama(messages: list[dict]) -> AsyncIterator[str]:
     client = _get_ollama_client()
     stream = await client.chat(
-        model=OLLAMA_MODEL, messages=messages, options=await _ollama_options(), stream=True
+        model=OLLAMA_MODEL, messages=messages, options=_ollama_options(), stream=True
     )
-    aiter = stream.__aiter__()
+    stream_iter = stream.__aiter__()
     while True:
         try:
-            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=STREAM_CHUNK_TIMEOUT)
+            chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=STREAM_CHUNK_TIMEOUT)
         except StopAsyncIteration:
             return
         delta = chunk["message"]["content"]

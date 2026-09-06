@@ -37,9 +37,16 @@ if sys.platform == "win32":
 import uvicorn
 
 if __name__ == "__main__":
+    # Defaults to 0.0.0.0, not 127.0.0.1: this binds a hosting platform's
+    # actual entrypoint (Render/Railway, per the Procfile), which proxies
+    # in from outside the container/VM and cannot reach a loopback-only
+    # bind. That's a deliberate choice for this deployment shape, not an
+    # oversight — HOST is still overridable (e.g. 127.0.0.1 for a
+    # local-only run, or a specific interface) for anyone who wants to
+    # restrict it.
     uvicorn.run(
         "api.main:app",
-        host="0.0.0.0",
+        host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
         workers=int(os.getenv("WEB_CONCURRENCY", "1")),
     )

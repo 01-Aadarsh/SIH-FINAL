@@ -118,8 +118,13 @@ async def synthesize_speech(text: str, language: str = "en-IN") -> str | None:
     if not text.strip():
         return None
     if language not in BULBUL_SUPPORTED_LANGUAGES:
+        # %r (not %s) on the caller-supplied value: repr() escapes newlines/
+        # control characters, so an arbitrary `language` string can't forge
+        # extra log lines (CWE-117) — this project's own log format has no
+        # other structure a forged line could impersonate, but there's no
+        # reason to pass user-controlled text into a log call unescaped.
         log.info(
-            "TTS skipped: Bulbul does not support language_code=%s "
+            "TTS skipped: Bulbul does not support language_code=%r "
             "(supported: %s)",
             language, sorted(BULBUL_SUPPORTED_LANGUAGES),
         )

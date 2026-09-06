@@ -19,8 +19,15 @@ jobs:
           node-version: "20"
           cache: "npm"
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
-      - run: npx tsc --noEmit
+      # --ignore-scripts: none of this project's dependencies need an
+      # install-time lifecycle script, so skip running arbitrary code a
+      # compromised transitive dependency could ship in one.
+      - run: npm ci --ignore-scripts
+      # --no-install: resolve `tsc` from this project's own node_modules
+      # (already installed above, pinned by package-lock.json) rather than
+      # letting npx fetch and run an arbitrary, unpinned `typescript`
+      # release on demand.
+      - run: npx --no-install tsc --noEmit
       - run: npm run lint
       - run: npm run build
 

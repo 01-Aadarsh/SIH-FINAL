@@ -177,7 +177,7 @@ function LogoBadge() {
   );
 }
 
-function FontSizeControl() {
+export function FontSizeControl() {
   const { decrease, increase, reset } = useFontScale();
   return (
     <div className="flex items-center gap-0.5 rounded-full bg-white/70 px-1 py-1.5 shadow-neuSm">
@@ -213,6 +213,7 @@ function IndiaFlag() {
   const spokes = Array.from({ length: 24 }, (_, i) => {
     const angle = (i * 2 * Math.PI) / 24;
     return {
+      angle,
       x2: Number((16 + 2.6 * Math.cos(angle)).toFixed(3)),
       y2: Number((11 + 2.6 * Math.sin(angle)).toFixed(3)),
     };
@@ -226,8 +227,8 @@ function IndiaFlag() {
       <rect width="32" height="7.33" fill="#FF9933" />
       <rect y="7.33" width="32" height="7.33" fill="#FFFFFF" />
       <rect y="14.67" width="32" height="7.33" fill="#138808" />
-      {spokes.map((s, i) => (
-        <line key={i} x1="16" y1="11" x2={s.x2} y2={s.y2} stroke="#000080" strokeWidth="0.25" />
+      {spokes.map((s) => (
+        <line key={s.angle} x1="16" y1="11" x2={s.x2} y2={s.y2} stroke="#000080" strokeWidth="0.25" />
       ))}
       <circle cx="16" cy="11" r="2.6" fill="none" stroke="#000080" strokeWidth="0.45" />
       <circle cx="16" cy="11" r="0.55" fill="#000080" />
@@ -251,14 +252,28 @@ function AyushBadge() {
   );
 }
 
-const LANGUAGES = [
-  { code: "en", label: "English" },
-  { code: "hi", label: "हिन्दी" },
-  { code: "mr", label: "मराठी" },
-  { code: "ta", label: "தமிழ்" },
-  { code: "te", label: "తెలుగు" },
-  { code: "bn", label: "বাংলা" },
+// BCP-47 codes matching backend/api/translation.py's TARGET_LANGUAGE_CODES
+// (Sarvam translation) AND backend/api/tts.py's BULBUL_SUPPORTED_LANGUAGES
+// (Sarvam voice) — every language offered here works for both the answer
+// text and, if enabled, its spoken audio. A wider set exists for
+// translation alone (see TARGET_LANGUAGE_CODES) but isn't offered here so
+// the switcher never lets a user pick a language voice output silently
+// can't cover.
+export const LANGUAGES = [
+  { code: "en-IN", label: "English" },
+  { code: "hi-IN", label: "हिन्दी" },
+  { code: "mr-IN", label: "मराठी" },
+  { code: "ta-IN", label: "தமிழ்" },
+  { code: "te-IN", label: "తెలుగు" },
+  { code: "bn-IN", label: "বাংলা" },
+  { code: "gu-IN", label: "ગુજરાતી" },
+  { code: "kn-IN", label: "ಕನ್ನಡ" },
+  { code: "ml-IN", label: "മലയാളം" },
+  { code: "pa-IN", label: "ਪੰਜਾਬੀ" },
+  { code: "od-IN", label: "ଓଡ଼ିଆ" },
 ] as const;
+
+export type LanguageCode = (typeof LANGUAGES)[number]["code"];
 
 function IconTranslate() {
   return (
@@ -274,9 +289,15 @@ function IconTranslate() {
   );
 }
 
-function LanguageSwitcher() {
+function LanguageSwitcher({
+  value,
+  onChange,
+}: {
+  value: LanguageCode;
+  onChange: (code: LanguageCode) => void;
+}) {
   const [open, setOpen] = useState(false);
-  const [lang, setLang] = useState<(typeof LANGUAGES)[number]>(LANGUAGES[0]);
+  const lang = LANGUAGES.find((l) => l.code === value) ?? LANGUAGES[0];
 
   return (
     <div className="relative">
@@ -286,7 +307,7 @@ function LanguageSwitcher() {
         className="flex items-center gap-1.5 rounded-full bg-white/70 px-2.5 py-1.5 text-xs font-semibold text-neu-text shadow-neuSm"
       >
         <IconTranslate />
-        {lang.code.toUpperCase()}
+        {lang.code.slice(0, 2).toUpperCase()}
         <span className={`text-[10px] text-neu-sub transition-transform ${open ? "rotate-180" : ""}`}>
           ▾
         </span>
@@ -299,7 +320,7 @@ function LanguageSwitcher() {
               key={l.code}
               type="button"
               onClick={() => {
-                setLang(l);
+                onChange(l.code);
                 setOpen(false);
               }}
               className={`flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-xs font-medium transition-colors ${
@@ -311,7 +332,8 @@ function LanguageSwitcher() {
             </button>
           ))}
           <p className="mt-1 border-t border-neu-bg px-3 pt-2 text-[10px] leading-snug text-neu-sub">
-            Powered by Bhashini / Sarvam — full answer translation coming soon.
+            Powered by Sarvam AI — questions, answers and voice all translate
+            into this language.
           </p>
         </div>
       )}
@@ -319,12 +341,32 @@ function LanguageSwitcher() {
   );
 }
 
-function Dots({ count, activeIndex, theme }: { count: number; activeIndex: number | null; theme: ThemeName }) {
+function jurisdictionIndex(jurisdiction: Jurisdiction | null): number | null {
+  if (jurisdiction === "india") return 0;
+  if (jurisdiction === "international") return 1;
+  return null;
+}
+
+function jurisdictionPillClass(jurisdiction: Jurisdiction | null): string {
+  const index = jurisdictionIndex(jurisdiction);
+  if (index === null) return "translate-x-0 opacity-0";
+  return index === 1 ? "translate-x-full opacity-100" : "translate-x-0 opacity-100";
+}
+
+function Dots({
+  count,
+  activeIndex,
+  theme,
+}: Readonly<{ count: number; activeIndex: number | null; theme: ThemeName }>) {
   return (
     <div className="mt-2.5 flex items-center gap-1.5">
+      {/* Index as key is safe here specifically: a fixed-length,
+       * never-reordered, never-inserted-into progress indicator whose only
+       * identity IS its position — there's no other data per dot to key on
+       * instead. NOSONAR: reviewed, not a bug. */}
       {Array.from({ length: count }).map((_, i) => (
         <span
-          key={i}
+          key={i} // NOSONAR
           className={`h-1.5 rounded-full transition-all ${
             i === activeIndex ? `w-4 ${THEME[theme].dot}` : "w-1.5 bg-neu-bg shadow-neuInset"
           }`}
@@ -337,10 +379,15 @@ function Dots({ count, activeIndex, theme }: { count: number; activeIndex: numbe
 export function IntakeScreen({
   onStart,
 }: {
-  onStart: (jurisdiction: Jurisdiction, category: string | null) => void;
+  onStart: (
+    jurisdiction: Jurisdiction,
+    category: string | null,
+    language: LanguageCode
+  ) => void;
 }) {
   const [jurisdiction, setJurisdiction] = useState<Jurisdiction | null>(null);
   const [category, setCategory] = useState<string | null>(null);
+  const [language, setLanguage] = useState<LanguageCode>("en-IN");
 
   const stepsDone = (jurisdiction ? 1 : 0) + (category ? 1 : 0);
   const readiness = jurisdiction ? Math.round((stepsDone / 2) * 100) : 0;
@@ -355,7 +402,7 @@ export function IntakeScreen({
           <LogoBadge />
           <div className="flex items-center gap-2">
             <FontSizeControl />
-            <LanguageSwitcher />
+            <LanguageSwitcher value={language} onChange={setLanguage} />
           </div>
         </div>
 
@@ -384,13 +431,7 @@ export function IntakeScreen({
 
           <div className="relative mt-3 flex rounded-full bg-neu-bg p-1 shadow-neuInset">
             <div
-              className={`absolute inset-y-1 left-1 w-[calc(50%-4px)] rounded-full shadow-neuSm transition-all duration-300 ${THEME.rose.fill} ${
-                jurisdiction === "international"
-                  ? "translate-x-full opacity-100"
-                  : jurisdiction === "india"
-                    ? "translate-x-0 opacity-100"
-                    : "translate-x-0 opacity-0"
-              }`}
+              className={`absolute inset-y-1 left-1 w-[calc(50%-4px)] rounded-full shadow-neuSm transition-all duration-300 ${THEME.rose.fill} ${jurisdictionPillClass(jurisdiction)}`}
             />
             <button
               type="button"
@@ -413,7 +454,7 @@ export function IntakeScreen({
           </div>
           <Dots
             count={2}
-            activeIndex={jurisdiction === "india" ? 0 : jurisdiction === "international" ? 1 : null}
+            activeIndex={jurisdictionIndex(jurisdiction)}
             theme="rose"
           />
         </div>
@@ -477,7 +518,7 @@ export function IntakeScreen({
           <button
             type="button"
             disabled={!jurisdiction}
-            onClick={() => jurisdiction && onStart(jurisdiction, category)}
+            onClick={() => jurisdiction && onStart(jurisdiction, category, language)}
             className={`mt-5 w-full rounded-2xl py-3 text-sm font-semibold text-white shadow-neuSm transition disabled:cursor-not-allowed disabled:opacity-40 ${THEME.amber.fill}`}
           >
             Start asking questions
@@ -487,17 +528,14 @@ export function IntakeScreen({
 
         <footer className="mt-6 w-full text-center">
           <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs font-medium text-white/75">
-            <a href="#" className="hover:text-white hover:underline">
-              Why use us?
-            </a>
+            {/* Plain text, not `<a href="#">` — there's no real destination
+             * for these yet (no about/policy/contact page exists), and a
+             * link that goes nowhere is worse than no link. */}
+            <span>Why use us?</span>
             <span aria-hidden>·</span>
-            <a href="#" className="hover:text-white hover:underline">
-              Policy details
-            </a>
+            <span>Policy details</span>
             <span aria-hidden>·</span>
-            <a href="#" className="hover:text-white hover:underline">
-              Contact us
-            </a>
+            <span>Contact us</span>
             <span aria-hidden>·</span>
             <a
               href="https://github.com/01-Aadarsh/frontend"

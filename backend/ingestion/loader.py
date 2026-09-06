@@ -130,8 +130,8 @@ def load_directory(directory: str | Path = "data") -> list[Page]:
     for pdf_path, jurisdiction in targets:
         try:
             all_pages.extend(load_pdf(pdf_path, jurisdiction=jurisdiction))
-        except Exception as exc:
-            log.error("Failed to load %s: %s", pdf_path.name, exc)
+        except Exception:
+            log.exception("Failed to load %s", pdf_path.name)
 
     log.info("Loaded %d pages from %d PDFs", len(all_pages), len(targets))
     return all_pages

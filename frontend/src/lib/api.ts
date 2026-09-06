@@ -139,13 +139,14 @@ function parseSseBlock(block: string): { event: string | null; data: string } {
  * fall back to the non-streaming `query()`, since a partial token stream
  * with no `done` payload has no citations/flags to show.
  */
-export async function queryStream(
+/** The fetch + response-validation half of queryStream, factored out so
+ * that function's cognitive complexity doesn't count this alongside the
+ * frame-reading loop below. Throws the same ClientTimeoutError/ApiError
+ * queryStream always has; never returns a non-ok response or a null body. */
+async function _openStreamResponse(
   req: QueryRequest,
-  callbacks: StreamCallbacks
-): Promise<void> {
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
-
+  controller: AbortController
+): Promise<Response> {
   let res: Response;
   try {
     res = await fetch(`${API_BASE_URL}/query/stream`, {
@@ -155,7 +156,6 @@ export async function queryStream(
       signal: controller.signal,
     });
   } catch (err) {
-    clearTimeout(timeoutId);
     if (err instanceof DOMException && err.name === "AbortError") {
       throw new ClientTimeoutError();
     }
@@ -166,9 +166,55 @@ export async function queryStream(
   }
 
   if (!res.ok || !res.body) {
-    clearTimeout(timeoutId);
     const detail = await extractErrorDetail(res);
     throw new ApiError(detail, res.status);
+  }
+  return res;
+}
+
+/** Dispatches one complete SSE frame (already split on the "\n\n"
+ * boundary) to `callbacks`. Returns true once the `done` event has fired,
+ * so queryStream's read loop knows it can stop. Factored out purely to
+ * keep queryStream's own cognitive complexity down. */
+function _dispatchSseFrame(rawBlock: string, callbacks: StreamCallbacks): boolean {
+  const { event, data } = parseSseBlock(rawBlock);
+  if (!event || !data) return false;
+
+  if (event === "token") {
+    const parsed = JSON.parse(data) as { text?: string };
+    if (parsed.text) callbacks.onToken(parsed.text);
+    return false;
+  }
+  if (event === "done") {
+    callbacks.onDone(JSON.parse(data) as StreamDoneData);
+    return true;
+  }
+  if (event === "error") {
+    const parsed = JSON.parse(data) as { detail?: string };
+    throw new ApiError(parsed.detail ?? "Streaming request failed.", 0);
+  }
+  return false;
+}
+
+export async function queryStream(
+  req: QueryRequest,
+  callbacks: StreamCallbacks
+): Promise<void> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await _openStreamResponse(req, controller);
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
+  if (!res.body) {
+    // _openStreamResponse already guarantees this; narrows the type for
+    // res.body.getReader() below.
+    clearTimeout(timeoutId);
+    throw new ApiError("Streaming response had no body.", 0);
   }
 
   const reader = res.body.getReader();
@@ -182,26 +228,16 @@ export async function queryStream(
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      let boundary: number;
       // SSE frames are separated by a blank line ("\n\n") — see
       // backend/api/main.py::_sse. A frame may arrive split across
       // multiple reader.read() calls, so only complete frames are
       // consumed here; the remainder stays in `buffer` for next time.
+      let boundary: number;
       while ((boundary = buffer.indexOf("\n\n")) !== -1) {
         const rawBlock = buffer.slice(0, boundary);
         buffer = buffer.slice(boundary + 2);
-        const { event, data } = parseSseBlock(rawBlock);
-        if (!event || !data) continue;
-
-        if (event === "token") {
-          const parsed = JSON.parse(data) as { text?: string };
-          if (parsed.text) callbacks.onToken(parsed.text);
-        } else if (event === "done") {
+        if (_dispatchSseFrame(rawBlock, callbacks)) {
           doneReceived = true;
-          callbacks.onDone(JSON.parse(data) as StreamDoneData);
-        } else if (event === "error") {
-          const parsed = JSON.parse(data) as { detail?: string };
-          throw new ApiError(parsed.detail ?? "Streaming request failed.", 0);
         }
       }
     }

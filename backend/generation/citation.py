@@ -25,7 +25,7 @@ def is_abstention(answer: str) -> bool:
 # chapter") without quoting a locator, so checking them would just produce
 # false positives rather than a real signal.
 _STATUTORY_REFERENCE_PATTERN = re.compile(
-    r"\b(?:Section|Article|Rule)\s+\d+[A-Za-z]?(?:\(\w+\))*", re.I
+    r"\b(?:Section|Article|Rule)\s+\d+[A-Z]?(?:\(\w+\))*", re.I
 )
 
 
@@ -85,6 +85,7 @@ def attach_citations(chunks: list[dict]) -> list[dict]:
                 "source_file": chunk["source_file"],
                 "page_number": chunk["page_number"],
                 "section_heading": chunk["section_heading"],
+                "text": chunk["text"],
             }
         )
     return citations

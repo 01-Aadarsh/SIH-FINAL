@@ -340,7 +340,8 @@ is unset (the current local-dev default), the endpoint is open.
   "chunk_id": "Patent_Office_Manual_Practice_Procedure_2011::p99::c99",
   "source_file": "Patent_Office_Manual_Practice_Procedure_2011.pdf",
   "page_number": 99,
-  "section_heading": "08.03.05.15 An invention which in effect, is traditional knowledge or Section 3(p)"
+  "section_heading": "08.03.05.15 An invention which in effect, is traditional knowledge or Section 3(p)",
+  "text": "An invention which in effect, is traditional knowledge or which is an aggregation or duplication of known properties of traditionally known component or components is not patentable under section 3(p)..."
 }
 ```
 
@@ -350,6 +351,7 @@ is unset (the current local-dev default), the endpoint is open.
 | `source_file` | string | The PDF's filename, exactly as it sits in `data/`. **This is what the user should see as "the source"** — display it directly, don't reformat it (filenames are deliberately citation-ready). | No — the ingestion pipeline hard-fails if any chunk is missing this. |
 | `page_number` | integer | 1-indexed PDF page number. | No. |
 | `section_heading` | string | Section/clause heading for that part of the document. For 10 of the 22 indexed documents (the Acts/Rules with real numbered-section structure — Trade Marks Act, Patents Act, Biological Diversity Act, Copyright Act, and others), this is now precise: `"Section 3. What are not inventions, clause (p)"` means the chunk **is** exactly that clause, not just text that mentions it. For the rest, it's a best-effort heuristic (e.g. `"5 Ibid"`, `"KNOWLEDGE AND BIOLOGICAL MATERIAL"`) — still useful, not guaranteed precise. | Never actually empty (falls back to the literal string `"Unlabelled section"`), but quality varies by document as described above. |
+| `text` | string | The actual chunk text retrieved and given to the LLM, verbatim from the source PDF — not model output. Lets a client show exactly what was cited without re-rendering the whole PDF page. | No, always present (the ingestion pipeline hard-fails on a chunk with no text). |
 
 `citations` is an array of these, already deduplicated by `chunk_id`, in the
 order the reranker ranked them (most relevant first — index 0 is the

@@ -3,6 +3,17 @@
 import { useEffect, useState } from "react";
 import { health } from "@/lib/api";
 import type { Jurisdiction } from "@/lib/types";
+import { FontSizeControl } from "./IntakeScreen";
+
+function backendStatusDotClass(backendUp: boolean | null): string {
+  if (backendUp === null) return "bg-clay-200";
+  return backendUp ? "bg-forest-500" : "bg-red-400";
+}
+
+function backendStatusLabel(backendUp: boolean | null): string {
+  if (backendUp === null) return "Checking backend...";
+  return backendUp ? "Backend online" : "Backend unreachable";
+}
 
 export function Header({
   jurisdiction,
@@ -54,21 +65,12 @@ export function Header({
         </div>
       </div>
 
-      <div className="flex shrink-0 items-center gap-1.5 text-xs text-ink/50">
-        <span
-          className={`h-2 w-2 rounded-full ${
-            backendUp === null
-              ? "bg-clay-200"
-              : backendUp
-                ? "bg-forest-500"
-                : "bg-red-400"
-          }`}
-        />
-        {backendUp === null
-          ? "Checking backend..."
-          : backendUp
-            ? "Backend online"
-            : "Backend unreachable"}
+      <div className="flex shrink-0 items-center gap-3">
+        <FontSizeControl />
+        <div className="flex items-center gap-1.5 text-xs text-ink/50">
+          <span className={`h-2 w-2 rounded-full ${backendStatusDotClass(backendUp)}`} />
+          {backendStatusLabel(backendUp)}
+        </div>
       </div>
     </header>
   );

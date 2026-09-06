@@ -55,11 +55,123 @@ One bounded exception to the straight-line flow: if the top rerank score is
 weak, the graph retries retrieval once with a reworded query before giving
 up and generating an answer (or abstaining). Never more than one retry.
 
-## Architecture diagram
+## Architecture
 
-The pipeline above is the LangGraph DAG itself; this is the full system —
-client through offline ingestion. See `docs/PROJECT_REPORT.md` for what
-every box actually is, file by file.
+Four views of the same system, from a 10-second glance to full file-level
+detail. See `docs/PROJECT_REPORT.md` for what every box in the detailed
+diagram actually is, file by file.
+
+### Simple overview
+
+The shape everything else in this section elaborates on: one question in,
+one grounded answer with real citations out — or an explicit "not in my
+sources" instead of a guess.
+
+```mermaid
+flowchart LR
+    U(["User"]) -->|"question<br/>(any of 23 languages)"| FE["Frontend<br/>Next.js"]
+    FE --> BE["Backend<br/>FastAPI + LangGraph"]
+    BE --> RAG["Retrieve + rerank<br/>against indexed PDFs"]
+    RAG --> LLM["Generate<br/>from retrieved text only"]
+    LLM --> ANS["Answer + citations<br/>— or an explicit abstain"]
+    ANS --> FE
+    FE --> U
+
+    style RAG fill:#e8f5e9,stroke:#2e7d32
+    style LLM fill:#fff3e0,stroke:#ef6c00
+    style ANS fill:#e3f2fd,stroke:#1565c0
+```
+
+### Request flow — what happens during one `/query` call
+
+Sequence, not structure: the actual order of operations, including the one
+conditional retry and the concurrency between translation and TTS.
+
+```mermaid
+sequenceDiagram
+    participant U as User (frontend)
+    participant API as FastAPI /query
+    participant TR as Translation (Sarvam)
+    participant G as LangGraph DAG
+    participant DB as pgvector + BM25
+    participant LLM as Groq / Ollama
+    participant TTS as TTS (Sarvam Bulbul)
+
+    U->>API: question, jurisdiction, language
+    API->>TR: translate question -> English (no-op if already en-IN)
+    TR-->>API: english_question
+    API->>G: ainvoke({query, history, jurisdiction})
+    G->>G: rewrite_query -> triage_formulation
+    G->>DB: hybrid retrieval (BM25 + dense) -> top 20
+    DB-->>G: candidates
+    G->>G: cross-encoder rerank -> top 5
+    alt rerank score weak AND not yet retried
+        G->>DB: retry once with a reworded query
+        DB-->>G: new candidates -> rerank again
+    end
+    G->>LLM: generate (retrieved text only, no outside knowledge)
+    LLM-->>G: answer (or the abstention marker)
+    G->>G: attach citations (code, not the model) + expand_related_provisions
+    G-->>API: answer, citations, flags, related_provisions
+    API->>TR: translate answer back -> `language` (no-op if en-IN)
+    par translation
+        TR-->>API: translated_answer
+    and optional TTS (only if requested)
+        API->>TTS: synthesize(translated_answer, language)
+        TTS-->>API: audio_base64 (or null if unsupported/failed)
+    end
+    API-->>U: answer + citations + audio_base64 (or none)
+```
+
+### Multilingual flow — why retrieval only ever sees English
+
+The single design decision that makes 23-language support tractable:
+translation happens only at the two edges, never inside retrieval or the
+prompt.
+
+```mermaid
+flowchart LR
+    Q["Question<br/>(hi-IN, ta-IN, ...)"] --> T1["Sarvam translate<br/>-> en-IN"]
+    T1 --> PIPE["Retrieval + reranking + generation<br/>— always English, never sees `language`"]
+    PIPE --> T2["Sarvam translate<br/>en-IN -> `language`"]
+    T2 --> ANS["Answer, in the user's language"]
+    T2 -.->|"if synthesize_audio<br/>and language is Bulbul-supported"| TTS["Bulbul TTS<br/>spoken answer"]
+
+    PROT["Protected-term swap<br/>(Churna, Bhasma, Taila, ...)"] -.-> T1
+    PROT -.-> T2
+
+    style PIPE fill:#e8f5e9,stroke:#2e7d32
+```
+
+`en-IN` (the default) skips both translation calls entirely — zero added
+latency, identical behavior to a language-unaware system. A fixed lexicon
+of Ayurvedic terms (Churna, Bhasma, Taila, Kwatha, Rasa Shastra, Asava,
+Arishta) is swapped for an opaque placeholder before every translate call
+and restored after, so Sarvam never mistranslates or transliterates a term
+this project's corpus depends on into an approximate gloss.
+
+### Offline ingestion flow — how the corpus becomes queryable
+
+Runs once per corpus change (`python -m ingestion.indexer --reset`), never
+per request.
+
+```mermaid
+flowchart LR
+    PDF[("data/*.pdf<br/>data/international/*.pdf")] --> LOAD["loader.py<br/>extract text per page"]
+    LOAD --> CHK{"chunker.py"}
+    CHK -->|"Act/Rule with real<br/>numbered sections"| HIER["Hierarchical statutory<br/>chunker — one chunk<br/>per clause"]
+    CHK -->|"no such structure<br/>(gazette, brief, factsheet)"| SLIDE["Sliding-window<br/>chunker"]
+    HIER --> TAG["tag_statutory_metadata<br/>(keyword/heading tags)"]
+    SLIDE --> TAG
+    TAG --> VAL["validate_chunks<br/>fails loudly if citation<br/>metadata is missing"]
+    VAL --> EMB["Embed<br/>(sentence-transformers)"]
+    EMB --> PGV[("pgvector")]
+    VAL --> BMB["Build BM25 index<br/>(per-jurisdiction)"]
+    BMB --> BMI[("BM25 pickle")]
+    VAL -.->|"python -m graph_kg.build_kg<br/>(separate command)"| KG[("knowledge_graph.json")]
+```
+
+### Detailed architecture — every module, client through storage
 
 ```mermaid
 flowchart TD
@@ -242,8 +354,8 @@ confirm it opens the real PDF at the right page.
 ## Setup
 
 ```bash
-git clone https://github.com/ayushanand27/sih-2026.git
-cd sih-2026/backend
+git clone https://github.com/01-Aadarsh/SIH-FINAL.git
+cd SIH-FINAL/backend
 
 python -m venv .venv
 .venv\Scripts\activate          # Windows; `source .venv/bin/activate` on Mac/Linux
@@ -331,6 +443,16 @@ npm run dev
 Then open `http://localhost:3000`. `NEXT_PUBLIC_API_BASE_URL` in
 `.env.local` is the only thing to change if the backend isn't on its
 default port/host.
+
+## Demo
+
+`docs/DEMO_QUERIES.md` — 7 questions verified live against the running
+backend (6 that answer well across different statutes/jurisdictions/
+languages, 1 deliberately out-of-scope one that should abstain), with
+expected confidence/citation counts and talking points for each. Use that
+list rather than improvising questions live — small rephrasing can change
+the retrieval score (BM25 is exact-token matching), so an unverified
+question risks a weaker answer than the system is actually capable of.
 
 ## Current status
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { Mic, MicOff } from "lucide-react";
+import { Mic, MicOff, Volume2, VolumeX } from "lucide-react";
 import {
   ApiError,
   ClientTimeoutError,
@@ -50,10 +50,12 @@ function pickRecorderMimeType(): { mimeType: string | undefined; extension: stri
 export function ChatView({
   jurisdiction,
   category,
+  language,
   onChangeContext,
 }: {
   jurisdiction: Jurisdiction;
   category: string | null;
+  language: string;
   onChangeContext: () => void;
 }) {
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
@@ -65,10 +67,17 @@ export function ChatView({
   const [transcribing, setTranscribing] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
 
+  // Off by default: /query/stream (the fast path below) never returns
+  // audio (docs/API_CONTRACT.md), so enabling this switches a turn to the
+  // slower non-streaming /query with synthesize_audio:true instead of
+  // silently doing nothing.
+  const [autoSpeak, setAutoSpeak] = useState(false);
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioPlayerRef = useRef<HTMLAudioElement>(null);
 
   const scrollToBottom = () => {
     requestAnimationFrame(() => {
@@ -135,9 +144,46 @@ export function ChatView({
       { id: assistantId, role: "assistant", content: "", pending: true },
     ]);
 
+    // /query/stream never returns audio (docs/API_CONTRACT.md) — with
+    // autoSpeak on, go straight to the non-streaming endpoint so there's
+    // actually audio to play, instead of streaming text and then finding
+    // out at the end there's nothing to speak.
+    if (autoSpeak) {
+      try {
+        const res = await query({
+          question: augmentedQuestion,
+          history,
+          jurisdiction,
+          language,
+          synthesize_audio: true,
+        });
+        applyDoneData(assistantId, res);
+        if (res.audio_base64 && audioPlayerRef.current) {
+          audioPlayerRef.current.src = `data:audio/wav;base64,${res.audio_base64}`;
+          void audioPlayerRef.current.play();
+        }
+      } catch (err) {
+        const message =
+          err instanceof ApiError || err instanceof ClientTimeoutError
+            ? err.message
+            : "Something went wrong talking to the backend.";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? { ...m, content: "", error: message, pending: false }
+              : m
+          )
+        );
+      } finally {
+        setSending(false);
+        scrollToBottom();
+      }
+      return;
+    }
+
     try {
       await queryStream(
-        { question: augmentedQuestion, history, jurisdiction },
+        { question: augmentedQuestion, history, jurisdiction, language },
         {
           onToken: (text) => {
             setMessages((prev) =>
@@ -162,26 +208,9 @@ export function ChatView({
           question: augmentedQuestion,
           history,
           jurisdiction,
+          language,
         });
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === assistantId
-              ? {
-                  ...m,
-                  content: res.answer,
-                  citations: res.citations,
-                  flags: res.flags,
-                  formulation_category: res.formulation_category,
-                  confidence_score: res.confidence_score,
-                  related_provisions: res.related_provisions,
-                  needs_clarification: res.needs_clarification,
-                  clarifying_questions: res.clarifying_questions,
-                  actionable_forms: res.actionable_forms,
-                  pending: false,
-                }
-              : m
-          )
-        );
+        applyDoneData(assistantId, res);
       } catch (err) {
         const message =
           err instanceof ApiError || err instanceof ClientTimeoutError
@@ -241,7 +270,7 @@ export function ChatView({
           const { transcript } = await transcribeAudio(
             blob,
             `voice-input.${extension}`,
-            "unknown"
+            language
           );
           if (transcript.trim()) {
             setInput(transcript);
@@ -287,6 +316,10 @@ export function ChatView({
 
   return (
     <div className="flex h-screen flex-col bg-paper">
+      {/* Hidden — played programmatically when autoSpeak's query() response
+       * carries audio_base64. No visible controls: the speaker toggle above
+       * is the UI for this. */}
+      <audio ref={audioPlayerRef} className="hidden" />
       <Header
         jurisdiction={jurisdiction}
         category={category}
@@ -328,7 +361,7 @@ export function ChatView({
           <div className="border-t border-clay-200 bg-white px-4 py-3 sm:px-8">
             {transcribing && (
               <p className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-forest-600">
-                <span className="h-1.5 w-1.5 animate-pulseSoft rounded-full bg-forest-500" />
+                <span className="h-1.5 w-1.5 animate-pulseSoft rounded-full bg-forest-500" />{" "}
                 Transcribing via Sarvam Saaras...
               </p>
             )}
@@ -342,6 +375,24 @@ export function ChatView({
               }}
               className="flex items-end gap-2"
             >
+              <button
+                type="button"
+                onClick={() => setAutoSpeak((v) => !v)}
+                aria-pressed={autoSpeak}
+                aria-label={autoSpeak ? "Voice replies on" : "Voice replies off"}
+                title={
+                  autoSpeak
+                    ? "Voice replies on — answers will be spoken (slower, uses the non-streaming endpoint)"
+                    : "Voice replies off — tap to have answers spoken aloud in the selected language"
+                }
+                className={`shrink-0 rounded-2xl border px-3 py-2.5 transition ${
+                  autoSpeak
+                    ? "border-forest-300 bg-forest-50 text-forest-700"
+                    : "border-clay-200 text-ink/60 hover:border-forest-300 hover:bg-forest-50 hover:text-forest-700"
+                }`}
+              >
+                {autoSpeak ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+              </button>
               <button
                 type="button"
                 onClick={toggleMic}

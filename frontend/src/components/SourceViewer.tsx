@@ -42,6 +42,14 @@ export function SourceViewer({
           ✕
         </button>
       </div>
+      <div className="border-b border-clay-200 bg-forest-50/60 px-4 py-3">
+        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-forest-700">
+          Exact retrieved text
+        </p>
+        <blockquote className="max-h-40 overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-ink/80">
+          {citation.text}
+        </blockquote>
+      </div>
       <iframe
         key={citation.chunk_id}
         title={`${citation.source_file}, page ${citation.page_number}`}

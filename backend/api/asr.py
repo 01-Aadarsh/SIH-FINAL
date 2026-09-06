@@ -153,7 +153,15 @@ if __name__ == "__main__":
         print("Usage: python -m api.asr <audio_file> [language_code]")
         sys.exit(1)
 
-    audio_path = Path(sys.argv[1])
+    # This is a local CLI entrypoint (a developer running `python -m
+    # api.asr <path>` at their own terminal), not a network-facing code
+    # path — but validate the path before touching the filesystem anyway
+    # rather than trusting an arbitrary argv value, same "fail loudly, don't
+    # assume" convention as the rest of this codebase.
+    audio_path = Path(sys.argv[1]).resolve()
+    if not audio_path.is_file():
+        print(f"Not a file: {audio_path}")
+        sys.exit(1)
     lang = sys.argv[2] if len(sys.argv) > 2 else "unknown"
 
     transcript, detected = asyncio.run(

@@ -11,7 +11,7 @@ const STEP = 10;
 function readStoredScale(): number {
   if (typeof window === "undefined") return 100;
   const raw = window.localStorage.getItem(STORAGE_KEY);
-  const parsed = raw ? parseInt(raw, 10) : NaN;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : 100;
 }
 

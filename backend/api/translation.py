@@ -78,13 +78,15 @@ SOURCE_LANGUAGE_CODES: tuple[str, ...] = ("auto", *TARGET_LANGUAGE_CODES)
 # English term. Not exhaustive; the six terms named in the request plus
 # Arishta (near-synonym of Asava, common enough alongside it to be worth
 # including) and their most common alternate spellings.
+_RASA_SHASTRA = "Rasa Shastra"
+
 PROTECTED_AYURVEDIC_TERMS: dict[str, str] = {
     "churna": "Churna", "churn": "Churna", "chura": "Churna", "चूर्ण": "Churna",
     "bhasma": "Bhasma", "bhasm": "Bhasma", "भस्म": "Bhasma",
     "taila": "Taila", "tail": "Taila", "तैल": "Taila", "तेल": "Taila",
     "kwath": "Kwatha", "kwatha": "Kwatha", "kashaya": "Kwatha", "काढा": "Kwatha", "क्वाथ": "Kwatha",
-    "rasa shastra": "Rasa Shastra", "rasashastra": "Rasa Shastra",
-    "रस शास्त्र": "Rasa Shastra", "रसशास्त्र": "Rasa Shastra",
+    "rasa shastra": _RASA_SHASTRA, "rasashastra": _RASA_SHASTRA,
+    "रस शास्त्र": _RASA_SHASTRA, "रसशास्त्र": _RASA_SHASTRA,
     "asava": "Asava", "आसव": "Asava",
     "arishta": "Arishta", "अरिष्ट": "Arishta",
 }

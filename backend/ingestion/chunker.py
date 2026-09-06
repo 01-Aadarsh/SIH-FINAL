@@ -284,18 +284,25 @@ def tag_statutory_metadata(source_file: str, text: str, section_heading: str = "
 
     tags = []
     if section_heading:
-        for source_substring, pattern, tag in _HEADING_TAG_RULES:
-            if source_substring and source_substring not in source_file:
-                continue
-            if pattern.search(section_heading):
-                tags.append(tag)
+        tags.extend(_match_tag_rules(_HEADING_TAG_RULES, source_file, section_heading))
+    tags.extend(_match_tag_rules(_STATUTORY_TAG_RULES, source_file, text))
+    return sorted(set(tags))
 
-    for source_substring, pattern, tag in _STATUTORY_TAG_RULES:
+
+def _match_tag_rules(
+    rules: list[tuple[str, re.Pattern, str]], source_file: str, haystack: str
+) -> list[str]:
+    """Shared body for tag_statutory_metadata's two rule passes (heading
+    rules, body-text rules) — factored out so that function's cognitive
+    complexity doesn't double-count the same source-filter-then-search shape
+    twice."""
+    matched = []
+    for source_substring, pattern, tag in rules:
         if source_substring and source_substring not in source_file:
             continue
-        if pattern.search(text):
-            tags.append(tag)
-    return sorted(set(tags))
+        if pattern.search(haystack):
+            matched.append(tag)
+    return matched
 
 
 def detect_heading(text: str) -> str:
@@ -332,7 +339,11 @@ def detect_heading(text: str) -> str:
 # tells them apart. Verified against real extracted text from
 # Patents_Act_1970.pdf and Trade_Marks_Act_1999.pdf before relying on it —
 # not assumed from the section number format alone.
-SECTION_HEADER_PATTERN = re.compile(r"^(\d+[A-Z]?)\.\s+(.+?)\.\s*[-–—]\s*(.*)$")
+# [^.]+ (not the lazy .+? this used to be) rules out backtracking blowup on
+# a long title-less line with many periods and no dash: the engine can no
+# longer try every possible split point before failing, since a `.` can
+# never be part of the title group to begin with.
+SECTION_HEADER_PATTERN = re.compile(r"^(\d+[A-Z]?)\.\s+([^.]+)\.\s*[-–—]\s*(.*)$")
 
 # A lettered/numbered clause opening a line within a section's body — "(a)",
 # "(zb)", "(1)", "(i)".
@@ -554,52 +565,81 @@ class HierarchicalStatutoryChunker:
             self.records.append((heading, self.clause_label or "", text, self.current_page, context_header))
         self.clause_lines = []
 
+    def _try_chapter_header(self, stripped_line: str) -> bool:
+        """True if `stripped_line` opened a new chapter (and was consumed)."""
+        chapter_match = CHAPTER_HEADER_PATTERN.match(stripped_line)
+        if not chapter_match:
+            return False
+        self.chapter_number = chapter_match.group(1)
+        self.chapter_title = ""
+        self._awaiting_chapter_title = True
+        return True
+
+    def _try_chapter_title_line(self, stripped_line: str) -> bool:
+        """Only call while self._awaiting_chapter_title is True. Returns
+        True if `stripped_line` was consumed as the chapter's title; False
+        if it wasn't title-shaped and must still be processed as a normal
+        line by the caller (it might be the first real section header,
+        e.g. immediately after a one-line-title chapter with no separate
+        TOC banner)."""
+        self._awaiting_chapter_title = False
+        # isupper() is true only when there's at least one cased character
+        # and every cased character is uppercase — real section/clause body
+        # lines (lowercase words, digits, punctuation) never satisfy this,
+        # so this can't accidentally swallow actual content as a fake
+        # title. "SECTIONS" is excluded by name: it's the literal marker
+        # line these Acts print between a chapter's title and its
+        # arrangement-of-sections list, verified against real extracted
+        # text, not itself ever a chapter title.
+        if stripped_line and stripped_line.isupper() and stripped_line != "SECTIONS":
+            self.chapter_title = stripped_line
+            return True
+        return False
+
+    def _try_section_header(self, page_number: int, stripped_line: str) -> bool:
+        """True if `stripped_line` opened a new section (and was consumed)."""
+        section_match = SECTION_HEADER_PATTERN.match(stripped_line)
+        if not section_match:
+            return False
+        self._flush_clause()
+        self.current_page = page_number
+        self.section_number = section_match.group(1)
+        self.section_title = section_match.group(2).strip()
+        self.clause_label = None
+        self._reset_sequence()
+        remainder = section_match.group(3)
+        clause_match = CLAUSE_PATTERN.match(remainder)
+        if clause_match and self._accept_as_top_level(clause_match.group(1)):
+            self.clause_label = clause_match.group(1)
+            self.clause_lines = [remainder[clause_match.end():]]
+        else:
+            self.clause_lines = [remainder]
+        return True
+
+    def _handle_body_line(self, page_number: int, line: str, stripped_line: str) -> None:
+        """A line inside an already-open section: either a new top-level
+        clause or a continuation of the current one."""
+        clause_match = CLAUSE_PATTERN.match(stripped_line)
+        if clause_match and self._accept_as_top_level(clause_match.group(1)):
+            self._flush_clause()
+            self.current_page = page_number
+            self.clause_label = clause_match.group(1)
+            self.clause_lines = [stripped_line[clause_match.end():]]
+        else:
+            self.clause_lines.append(line)
+
     def feed_page(self, page_number: int, raw_text: str) -> None:
         self.current_page = page_number
         for line in (raw_text or "").split("\n"):
             stripped_line = line.strip()
 
-            chapter_match = CHAPTER_HEADER_PATTERN.match(stripped_line)
-            if chapter_match:
-                self.chapter_number = chapter_match.group(1)
-                self.chapter_title = ""
-                self._awaiting_chapter_title = True
+            if self._try_chapter_header(stripped_line):
                 continue
 
-            if self._awaiting_chapter_title:
-                self._awaiting_chapter_title = False
-                # isupper() is true only when there's at least one cased
-                # character and every cased character is uppercase — real
-                # section/clause body lines (lowercase words, digits,
-                # punctuation) never satisfy this, so this can't
-                # accidentally swallow actual content as a fake title.
-                # "SECTIONS" is excluded by name: it's the literal marker
-                # line these Acts print between a chapter's title and its
-                # arrangement-of-sections list, verified against real
-                # extracted text, not itself ever a chapter title.
-                if stripped_line and stripped_line.isupper() and stripped_line != "SECTIONS":
-                    self.chapter_title = stripped_line
-                    continue
-                # Not a title line — fall through so it's still processed
-                # as a normal line below (it might be the first real
-                # section header, e.g. immediately after a one-line-title
-                # chapter with no separate TOC banner).
+            if self._awaiting_chapter_title and self._try_chapter_title_line(stripped_line):
+                continue
 
-            section_match = SECTION_HEADER_PATTERN.match(stripped_line)
-            if section_match:
-                self._flush_clause()
-                self.current_page = page_number
-                self.section_number = section_match.group(1)
-                self.section_title = section_match.group(2).strip()
-                self.clause_label = None
-                self._reset_sequence()
-                remainder = section_match.group(3)
-                clause_match = CLAUSE_PATTERN.match(remainder)
-                if clause_match and self._accept_as_top_level(clause_match.group(1)):
-                    self.clause_label = clause_match.group(1)
-                    self.clause_lines = [remainder[clause_match.end():]]
-                else:
-                    self.clause_lines = [remainder]
+            if self._try_section_header(page_number, stripped_line):
                 continue
 
             if self.section_number is None:
@@ -607,14 +647,7 @@ class HierarchicalStatutoryChunker:
                 # section — not this chunker's concern, see chunk_pages().
                 continue
 
-            clause_match = CLAUSE_PATTERN.match(stripped_line)
-            if clause_match and self._accept_as_top_level(clause_match.group(1)):
-                self._flush_clause()
-                self.current_page = page_number
-                self.clause_label = clause_match.group(1)
-                self.clause_lines = [stripped_line[clause_match.end():]]
-            else:
-                self.clause_lines.append(line)
+            self._handle_body_line(page_number, line, stripped_line)
 
     def finish(self) -> list[tuple[str, str, str, int, str]]:
         self._flush_clause()
@@ -794,6 +827,23 @@ def chunk_pages(
     return chunks
 
 
+def _chunk_metadata_problems(chunk: Chunk) -> list[str]:
+    """The five independent per-chunk checks validate_chunks runs, factored
+    out purely to keep that function's cognitive complexity down."""
+    problems: list[str] = []
+    if not chunk.source_file:
+        problems.append(f"{chunk.chunk_id}: empty source_file")
+    if not chunk.page_number or chunk.page_number < 1:
+        problems.append(f"{chunk.chunk_id}: invalid page_number")
+    if not chunk.text.strip():
+        problems.append(f"{chunk.chunk_id}: empty text")
+    if not chunk.chunk_id:
+        problems.append("a chunk has an empty chunk_id")
+    if chunk.jurisdiction not in ("india", "international"):
+        problems.append(f"{chunk.chunk_id}: invalid jurisdiction {chunk.jurisdiction!r}")
+    return problems
+
+
 def validate_chunks(chunks: list[Chunk]) -> None:
     """
     Fail loudly if any chunk is missing citation metadata.
@@ -805,18 +855,7 @@ def validate_chunks(chunks: list[Chunk]) -> None:
     problems: list[str] = []
 
     for chunk in chunks:
-        if not chunk.source_file:
-            problems.append(f"{chunk.chunk_id}: empty source_file")
-        if not chunk.page_number or chunk.page_number < 1:
-            problems.append(f"{chunk.chunk_id}: invalid page_number")
-        if not chunk.text.strip():
-            problems.append(f"{chunk.chunk_id}: empty text")
-        if not chunk.chunk_id:
-            problems.append("a chunk has an empty chunk_id")
-        if chunk.jurisdiction not in ("india", "international"):
-            problems.append(
-                f"{chunk.chunk_id}: invalid jurisdiction {chunk.jurisdiction!r}"
-            )
+        problems.extend(_chunk_metadata_problems(chunk))
 
     ids = [c.chunk_id for c in chunks]
     if len(ids) != len(set(ids)):

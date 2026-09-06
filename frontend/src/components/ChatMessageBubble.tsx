@@ -8,10 +8,10 @@ import { ActionableFormCard } from "./ActionableFormCard";
 export function ChatMessageBubble({
   message,
   onViewCitation,
-}: {
+}: Readonly<{
   message: ConversationMessage;
   onViewCitation: (citation: Citation) => void;
-}) {
+}>) {
   const isUser = message.role === "user";
 
   if (message.error) {

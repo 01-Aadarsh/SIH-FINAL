@@ -9,22 +9,30 @@ import type { FormCard } from "@/lib/types";
 export function ActionableFormModal({
   form,
   onClose,
-}: {
+}: Readonly<{
   form: FormCard;
   onClose: () => void;
-}) {
+}>) {
   return (
     <div
       className="fixed inset-0 z-30 flex items-center justify-center bg-ink/40 p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby={`form-modal-title-${form.form_id}`}
-      onClick={onClose}
     >
-      <div
-        className="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+      {/* A real <button> covering the backdrop, not a click handler on a
+       * plain <div> — click-to-close-on-backdrop is a native button
+       * interaction; keyboard/screen-reader users close via the explicit
+       * ✕ button below instead (tabIndex={-1} keeps this out of tab
+       * order so it doesn't sit awkwardly ahead of the real content). */}
+      <button
+        type="button"
+        className="fixed inset-0 cursor-default"
+        aria-label="Close"
+        tabIndex={-1}
+        onClick={onClose}
+      />
+      <div className="relative max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white p-6 shadow-2xl">
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase tracking-wide text-saffron-600">

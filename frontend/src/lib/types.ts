@@ -20,15 +20,17 @@ export interface ChatTurn {
   content: string;
 }
 
-/** Exactly what the backend's Citation model returns — no `text` or
- * per-citation `confidence` field exists there (see docs/API_CONTRACT.md).
- * The LLM never writes these; they're attached from the chunks that were
- * actually retrieved (generation/citation.py). */
+/** Exactly what the backend's Citation model returns — no per-citation
+ * `confidence` field exists there (see docs/API_CONTRACT.md). The LLM never
+ * writes these; they're attached from the chunks that were actually
+ * retrieved (generation/citation.py). `text` is the verbatim retrieved
+ * chunk, not model output. */
 export interface Citation {
   chunk_id: string;
   source_file: string;
   page_number: number;
   section_heading: string;
+  text: string;
 }
 
 export interface Flags {

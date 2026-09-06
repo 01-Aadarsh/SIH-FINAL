@@ -205,12 +205,41 @@ async def connect_async() -> psycopg.AsyncConnection:
     nothing to gain from making it async. This exists because dense_search
     and fusion run inside the async LangGraph nodes and must not block the
     event loop with a synchronous DB round-trip.
+
+    Retries with backoff (initial attempt, then after 1s, 2s, 4s — 4 attempts
+    total): reproduced directly against the live Neon DB this project uses,
+    the actual failure is `psycopg.OperationalError: [Errno 11002]
+    getaddrinfo failed` — a transient failure in asyncio's own DNS
+    resolution path on Windows, not a dead or unreachable host (a plain
+    synchronous `socket.getaddrinfo()` against the same hostname at the same
+    moment resolved instantly). A single 2s retry wasn't enough margin —
+    this still failed on the second attempt in testing — so this now allows
+    several. Also covers Neon/Supabase's free-tier compute suspending after
+    a few idle minutes and taking a moment to wake on the next connection,
+    the same shape of problem. Observed symptom this fixes: the very first
+    query after a lull fails with a generic 500, and a manual retry seconds
+    later succeeds because the transient condition has cleared — the retry
+    belongs here instead of in every caller.
     """
     if not DATABASE_URL:
         raise RuntimeError(
             "DATABASE_URL is not set. Copy .env.example to .env and fill it in."
         )
-    conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
+    last_error: psycopg.OperationalError | None = None
+    for attempt, backoff in enumerate((0, 1, 2, 4)):
+        if backoff:
+            log.warning(
+                "DB connect failed (attempt %d) — retrying in %ds", attempt, backoff
+            )
+            await asyncio.sleep(backoff)
+        try:
+            conn = await psycopg.AsyncConnection.connect(DATABASE_URL)
+            break
+        except psycopg.OperationalError as exc:
+            last_error = exc
+    else:
+        assert last_error is not None
+        raise last_error
     async with conn.cursor() as cur:
         await cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
     await conn.commit()

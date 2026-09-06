@@ -189,6 +189,14 @@ class Citation(BaseModel):
             "heading-shaped was found nearby."
         )
     )
+    text: str = Field(
+        description=(
+            "The actual chunk text retrieved and given to the LLM — verbatim "
+            "from the source PDF, not model output. Lets the frontend show "
+            "exactly what was cited without re-fetching or rendering the "
+            "whole PDF page."
+        )
+    )
 
 
 class Flags(BaseModel):
@@ -401,9 +409,82 @@ def get_source(filename: str):
     for directory in SOURCE_SEARCH_DIRS:
         candidate = directory / safe_name
         if candidate.is_file():
-            return FileResponse(candidate, media_type="application/pdf", filename=safe_name)
+            # content_disposition_type="inline" (default is "attachment") —
+            # otherwise the browser downloads the PDF instead of rendering
+            # it in SourceViewer's iframe.
+            return FileResponse(
+                candidate,
+                media_type="application/pdf",
+                filename=safe_name,
+                content_disposition_type="inline",
+            )
 
     raise HTTPException(status_code=404, detail=f"No source file named {safe_name!r} found.")
+
+
+async def _invoke_graph(
+    app_graph, english_question: str, history: list[dict], jurisdiction: str
+) -> dict:
+    """The try/except around the graph's own bounded execution budget,
+    factored out of run_query so its three failure modes (timeout / no LLM
+    reachable / anything else) don't count against that function's own
+    cognitive complexity budget."""
+    try:
+        return await asyncio.wait_for(
+            app_graph.ainvoke(
+                {
+                    "query": english_question,
+                    "history": history,
+                    "jurisdiction": jurisdiction,
+                    "flags": dict(DEFAULT_FLAGS),
+                }
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Request exceeded {REQUEST_TIMEOUT}s with no response from the LLM backend.",
+        )
+    except RuntimeError as exc:
+        # Raised by generation.llm_client when no LLM backend is reachable.
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception:
+        log.exception("Unhandled error in /query")
+        raise HTTPException(status_code=500, detail="Internal error processing the query.")
+
+
+async def _translate_and_maybe_speak(
+    english_answer: str, language: str, synthesize_audio: bool
+) -> tuple[str, str | None]:
+    """Translate the answer back to `language` and, if requested, synthesize
+    audio for it — factored out of run_query purely to keep that function's
+    cognitive complexity down; the concurrency behavior described below is
+    unchanged from when this was inline.
+
+    TTS speaks the *translated* answer, in that same language (Sarvam's
+    Bulbul TTS supports 11 of the languages translate_text() can target —
+    see api/tts.py::BULBUL_SUPPORTED_LANGUAGES; unsupported languages skip
+    audio there rather than guessing, so that check isn't duplicated here).
+    For en-IN, translation is a no-op, so audio can still start immediately
+    from english_answer without waiting on it — the same concurrency this
+    had before. Every other language must wait for the real translated text
+    first, since that's what gets voiced; synthesizing from English while
+    displaying Hindi would be worse than the small added latency.
+    """
+    translate_out = translate_text(english_answer, "en-IN", language)
+
+    if not synthesize_audio:
+        return await translate_out, None
+
+    if language == "en-IN":
+        audio_task = asyncio.ensure_future(synthesize_speech(english_answer, "en-IN"))
+        translated_answer = await translate_out
+    else:
+        translated_answer = await translate_out
+        audio_task = asyncio.ensure_future(synthesize_speech(translated_answer, language))
+
+    return translated_answer, await audio_task
 
 
 async def run_query(
@@ -427,55 +508,12 @@ async def run_query(
     # translate_text's own fallback rule, not special-cased here.
     english_question = await translate_text(question, language, "en-IN")
 
-    try:
-        result = await asyncio.wait_for(
-            app_graph.ainvoke(
-                {
-                    "query": english_question,
-                    "history": history,
-                    "jurisdiction": jurisdiction,
-                    "flags": dict(DEFAULT_FLAGS),
-                }
-            ),
-            timeout=REQUEST_TIMEOUT,
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=504,
-            detail=f"Request exceeded {REQUEST_TIMEOUT}s with no response from the LLM backend.",
-        )
-    except RuntimeError as exc:
-        # Raised by generation.llm_client when no LLM backend is reachable.
-        raise HTTPException(status_code=503, detail=str(exc))
-    except Exception:
-        log.exception("Unhandled error in /query")
-        raise HTTPException(status_code=500, detail="Internal error processing the query.")
-
+    result = await _invoke_graph(app_graph, english_question, history, jurisdiction)
     english_answer = result["answer"]
 
-    # TTS now speaks the *translated* answer, in that same language
-    # (Sarvam's Bulbul TTS supports 11 of the languages translate_text()
-    # can target — see api/tts.py::BULBUL_SUPPORTED_LANGUAGES; unsupported
-    # languages skip audio there rather than guessing, so that check isn't
-    # duplicated here). For en-IN, translation is a no-op, so audio can
-    # still start immediately from english_answer without waiting on it —
-    # the same concurrency this had before. Every other language must wait
-    # for the real translated text first, since that's what gets voiced;
-    # synthesizing from English while displaying Hindi would be worse than
-    # the small added latency.
-    translate_out = translate_text(english_answer, "en-IN", language)
-
-    if language == "en-IN" and synthesize_audio:
-        audio_task = asyncio.ensure_future(synthesize_speech(english_answer, "en-IN"))
-        translated_answer = await translate_out
-    elif synthesize_audio:
-        translated_answer = await translate_out
-        audio_task = asyncio.ensure_future(synthesize_speech(translated_answer, language))
-    else:
-        translated_answer = await translate_out
-        audio_task = None
-
-    audio_base64 = await audio_task if audio_task is not None else None
+    translated_answer, audio_base64 = await _translate_and_maybe_speak(
+        english_answer, language, synthesize_audio
+    )
 
     # Deterministic, no LLM call — same keyword+category+tag matcher the
     # standalone /api/v1/compliance/forms endpoint uses. Every catalog
@@ -756,7 +794,9 @@ async def voice_transcribe(
         transcript, detected_language = await transcribe_audio(
             audio_bytes, file.filename or "", language_code
         )
-    except (UnsupportedAudioFormat, ValueError, RuntimeError) as exc:
+    # UnsupportedAudioFormat IS a ValueError (see api/asr.py) — catching it
+    # separately alongside ValueError was redundant.
+    except (ValueError, RuntimeError) as exc:
         _raise_for_asr_error(exc)
 
     return TranscribeResponse(transcript=transcript, detected_language=detected_language)
@@ -797,7 +837,9 @@ async def voice_query(
         transcript, detected_language = await transcribe_audio(
             audio_bytes, file.filename or "", language_code
         )
-    except (UnsupportedAudioFormat, ValueError, RuntimeError) as exc:
+    # UnsupportedAudioFormat IS a ValueError (see api/asr.py) — catching it
+    # separately alongside ValueError was redundant.
+    except (ValueError, RuntimeError) as exc:
         _raise_for_asr_error(exc)
 
     # detected_language may be "unknown" (detection failed) or a code
