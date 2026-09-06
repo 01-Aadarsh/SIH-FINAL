@@ -119,7 +119,7 @@ def test_zb_gets_statutory_definition_classification():
     value of the context-header enrichment — see this module's docstring
     for why it does not, on its own, also fix "What is a trademark?"'s
     separate top-5 ranking problem."""
-    pages = load_pdf("../data/Trade_Marks_Act_1999.pdf")
+    pages = load_pdf("data/Trade_Marks_Act_1999.pdf")
     chunks = _chunk_statutory_document(pages)
 
     zb = [
@@ -138,7 +138,7 @@ def test_operative_section_gets_operative_classification():
     definitions section) gets [Classification: Operative Provision], so the
     classifier is discriminating between the two, not tagging everything
     the same way."""
-    pages = load_pdf("../data/Trade_Marks_Act_1999.pdf")
+    pages = load_pdf("data/Trade_Marks_Act_1999.pdf")
     chunks = _chunk_statutory_document(pages)
 
     infringement = [c for c in chunks if c.section_heading.startswith("Section 29.")]

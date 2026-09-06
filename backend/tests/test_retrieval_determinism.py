@@ -159,7 +159,7 @@ def test_section_2_1_zb_is_its_own_clean_chunk():
     from ingestion.chunker import chunk_pages
     from ingestion.loader import load_pdf
 
-    pages = load_pdf("../data/Trade_Marks_Act_1999.pdf")
+    pages = load_pdf("data/Trade_Marks_Act_1999.pdf")
     chunks = chunk_pages(pages)
     matches = [c for c in chunks if "clause (zb)" in c.section_heading]
 
@@ -310,7 +310,7 @@ def test_section_3p_gets_precise_heading_based_tag():
     from ingestion.chunker import chunk_pages
     from ingestion.loader import load_pdf
 
-    pages = load_pdf("../data/Patents_Act_1970.pdf")
+    pages = load_pdf("data/Patents_Act_1970.pdf")
     chunks = chunk_pages(pages)
 
     clause_p = [c for c in chunks if "Section 3" in c.section_heading and "clause (p)" in c.section_heading]
