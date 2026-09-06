@@ -22,7 +22,7 @@ from sentence_transformers import SentenceTransformer
 
 from ingestion.indexer import connect_async
 
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)

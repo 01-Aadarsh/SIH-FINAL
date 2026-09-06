@@ -46,7 +46,7 @@ from dotenv import load_dotenv
 
 from api.text_chunking import split_text
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 

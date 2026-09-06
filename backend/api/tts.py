@@ -1,43 +1,37 @@
 """
-Groq text-to-speech for IP-SAKTI.
+Sarvam AI (Bulbul) text-to-speech for IP-SAKTI.
 
-Reads the answer aloud in English, always — Groq's only TTS models
-(queried live against this project's own account: `canopylabs/orpheus-v1-
-english`, `canopylabs/orpheus-arabic-saudi`) do not cover Hindi or any
-other Indian language, so this synthesizes from the English answer
-regardless of what language the text response was translated into (see
-api/translation.py). A caller must not present this audio as being in the
-user's selected language — it isn't, and can't be, until Groq (or another
-provider) ships an Indian-language TTS voice.
+Replaces an earlier Groq-based implementation that used
+`canopylabs/orpheus-v1-english` — abandoned because (a) it required an org
+admin to manually accept the model's usage terms in the Groq console before
+any request would succeed at all, a step this project's Groq account never
+completed, and (b) even once working it was English-only, so a Hindi (or
+any other non-English) answer could never actually be *heard* in the
+language it was translated into.
 
-Two things this module cannot verify from code, and had to be designed
-around rather than confirmed, because the Groq org behind this project's
-GROQ_API_KEY has not accepted canopylabs/orpheus-v1-english's model terms
-yet (every real request 400s with "requires terms acceptance" regardless of
-input — reproduced directly, not assumed):
-  1. A valid `voice` name. GROQ_TTS_VOICE has no fabricated default for this
-     reason — synthesize_speech() refuses to guess and skips TTS with a
-     clear log message instead. To fix: an org admin visits
-     https://console.groq.com/playground?model=canopylabs/orpheus-v1-english,
-     accepts the terms, finds a real voice name there, and sets
-     GROQ_TTS_VOICE.
-  2. The exact per-request character limit (~200 per Groq's docs, not
-     independently confirmed). TTS_MAX_CHARS defaults conservatively below
-     that; text longer than one chunk is split at sentence boundaries and
-     synthesized as multiple requests, concatenated into one WAV — safe
-     regardless of exactly where the real limit falls, at the cost of doing
-     more requests than strictly necessary if it turns out to be higher.
+Sarvam's Bulbul model needs no such manual approval — SARVAM_API_KEY (see
+api/translation.py, already required and already configured for this
+project) is sufficient — and it natively supports voice synthesis in 11 of
+the languages api/translation.py already translates into (see
+BULBUL_SUPPORTED_LANGUAGES below), so the answer can actually be spoken in
+the user's selected language instead of always falling back to English.
+Languages Sarvam translates but Bulbul cannot voice (e.g. Sanskrit,
+Manipuri) fall back to skipping audio, not to a mispronounced or
+wrong-language voice — same fail-open philosophy as api/translation.py.
 
-Uses the raw REST endpoint via httpx, not the `groq` Python SDK: the
-version already pinned in requirements.txt (0.13.1, used elsewhere in this
-codebase for chat completions) predates the SDK's `audio.speech` method —
-confirmed by AttributeError, not assumed. Bumping the SDK version to get
-that method risked the already-tested AsyncGroq chat-completion path in
-generation/llm_client.py; hitting the documented REST endpoint directly
-avoids that risk entirely for one extra module.
+Confirmed against Sarvam's own docs (docs.sarvam.ai/api-reference-docs/
+text-to-speech/api/rest-api and .../models/bulbul, 2026-09): endpoint,
+auth header, request/response shape, the 36 valid speaker names, and the
+2500-character-per-request limit for bulbul:v3. Not verified against a
+live call in this environment (SARVAM_API_KEY here is a real project key,
+but no request was fired during this edit) — if a genuinely wrong field
+name slipped through despite matching the docs, this fails open (returns
+None, logs a warning) exactly like every other failure mode below, so a
+demo never breaks on it; only real TTS silently doesn't play.
 
 Usage:
-    python -m api.tts "Section 3(p) excludes traditional knowledge from patentability."
+    python -m api.tts "Section 3(p) excludes traditional knowledge from patentability." en-IN
+    python -m api.tts "पारंपरिक ज्ञान" hi-IN
 """
 
 from __future__ import annotations
@@ -55,17 +49,31 @@ from dotenv import load_dotenv
 
 from api.text_chunking import split_text
 
-load_dotenv()
+load_dotenv(override=True)
 
 log = logging.getLogger(__name__)
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL", "canopylabs/orpheus-v1-english")
-# No fabricated default — see module docstring point 1.
-GROQ_TTS_VOICE = os.getenv("GROQ_TTS_VOICE", "")
-GROQ_TTS_BASE_URL = "https://api.groq.com/openai/v1"
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+SARVAM_BASE_URL = "https://api.sarvam.ai"
+SARVAM_TTS_MODEL = os.getenv("SARVAM_TTS_MODEL", "bulbul:v3")
+# "shubh" (Sarvam's own documented default) rather than an arbitrary pick
+# from the 36 available speakers — matches the model's own fallback choice
+# rather than introducing a preference this project has no basis for.
+SARVAM_TTS_SPEAKER = os.getenv("SARVAM_TTS_SPEAKER", "shubh")
 TTS_TIMEOUT = 20.0
-TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "180"))
+# bulbul:v3's documented hard limit is 2500 exactly; 2200 leaves margin the
+# same way api/translation.py's SARVAM_MAX_CHARS=950 leaves margin under
+# translate's 1000 — without meaningfully increasing chunk count for a
+# typical answer length.
+TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "2200"))
+
+# The 11 languages Bulbul can voice, out of the larger set
+# api/translation.py can translate into (TARGET_LANGUAGE_CODES) — a
+# request for any other language_code skips audio rather than guessing.
+BULBUL_SUPPORTED_LANGUAGES: frozenset[str] = frozenset({
+    "en-IN", "hi-IN", "bn-IN", "gu-IN", "kn-IN", "ml-IN",
+    "mr-IN", "od-IN", "pa-IN", "ta-IN", "te-IN",
+})
 
 _client: httpx.AsyncClient | None = None
 
@@ -73,7 +81,7 @@ _client: httpx.AsyncClient | None = None
 def _get_client() -> httpx.AsyncClient:
     global _client
     if _client is None:
-        _client = httpx.AsyncClient(base_url=GROQ_TTS_BASE_URL, timeout=TTS_TIMEOUT)
+        _client = httpx.AsyncClient(base_url=SARVAM_BASE_URL, timeout=TTS_TIMEOUT)
     return _client
 
 
@@ -100,29 +108,24 @@ def _concat_wav(wav_chunks: list[bytes]) -> bytes:
 
 async def synthesize_speech(text: str, language: str = "en-IN") -> str | None:
     """
-    English-only TTS. Returns base64-encoded WAV audio, or None if synthesis
-    isn't possible or fails for any reason — this never raises, matching
-    translate_text()'s fail-open contract. `language` gates on whether the
-    *source* answer is English at all; it does not select a voice language
-    (there is only one language of voice available — see module docstring).
+    Text-to-speech via Sarvam's Bulbul model, in `language` directly — pass
+    the already-translated answer and its actual target language (not the
+    pre-translation English), so what's spoken matches what's shown.
+    Returns base64-encoded WAV audio, or None if synthesis isn't possible
+    or fails for any reason — this never raises, matching
+    translate_text()'s fail-open contract.
     """
     if not text.strip():
         return None
-    if not language.startswith("en"):
+    if language not in BULBUL_SUPPORTED_LANGUAGES:
         log.info(
-            "TTS skipped: Groq's TTS models are English-only, answer language is %s",
-            language,
+            "TTS skipped: Bulbul does not support language_code=%s "
+            "(supported: %s)",
+            language, sorted(BULBUL_SUPPORTED_LANGUAGES),
         )
         return None
-    if not GROQ_API_KEY:
-        log.warning("GROQ_API_KEY not set — skipping TTS")
-        return None
-    if not GROQ_TTS_VOICE:
-        log.warning(
-            "GROQ_TTS_VOICE not configured (model terms not yet accepted for %s on this "
-            "Groq account — see api/tts.py module docstring) — skipping TTS",
-            GROQ_TTS_MODEL,
-        )
+    if not SARVAM_API_KEY:
+        log.warning("SARVAM_API_KEY not set — skipping TTS")
         return None
 
     chunks = split_text(text, TTS_MAX_CHARS)
@@ -132,17 +135,21 @@ async def synthesize_speech(text: str, language: str = "en-IN") -> str | None:
         client = _get_client()
         for chunk in chunks:
             response = await client.post(
-                "/audio/speech",
-                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                "/text-to-speech",
+                headers={"api-subscription-key": SARVAM_API_KEY},
                 json={
-                    "model": GROQ_TTS_MODEL,
-                    "voice": GROQ_TTS_VOICE,
-                    "input": chunk,
-                    "response_format": "wav",
+                    "text": chunk,
+                    "language_code": language,
+                    "speaker": SARVAM_TTS_SPEAKER,
+                    "model": SARVAM_TTS_MODEL,
                 },
             )
             response.raise_for_status()
-            audio_chunks.append(response.content)
+            audios = response.json().get("audios") or []
+            if not audios:
+                raise ValueError(f"Sarvam TTS response had no audios: {response.json()!r}")
+            for audio_b64 in audios:
+                audio_chunks.append(base64.b64decode(audio_b64))
     except Exception as exc:
         log.warning("TTS synthesis failed: %s — returning no audio", exc)
         return None
@@ -155,12 +162,17 @@ async def synthesize_speech(text: str, language: str = "en-IN") -> str | None:
 
 
 if __name__ == "__main__":
-    text = " ".join(sys.argv[1:])
-    if not text:
-        print('Usage: python -m api.tts "text to speak"')
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    args = sys.argv[1:]
+    if not args:
+        print('Usage: python -m api.tts "text to speak" [language_code]')
         sys.exit(1)
 
-    result = asyncio.run(synthesize_speech(text))
+    text = args[0]
+    language = args[1] if len(args) > 1 else "en-IN"
+
+    result = asyncio.run(synthesize_speech(text, language))
     if result is None:
         print("No audio produced — check the log lines above for why.")
         sys.exit(1)

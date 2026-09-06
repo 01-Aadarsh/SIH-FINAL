@@ -24,7 +24,7 @@ from ingestion.indexer import connect_async
 from retrieval.bm25_search import search as bm25_search
 from retrieval.dense_search import search as dense_search
 
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)

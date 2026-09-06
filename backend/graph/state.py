@@ -26,6 +26,7 @@ class GraphState(TypedDict, total=False):
     confidence_score: float  # top reranked chunk's rerank_score, 0.0 if reranked is empty — exposed as QueryResponse.confidence_score
     answer: str
     citations: list[dict]
+    related_provisions: list[dict]  # knowledge-graph cross-references — see graph_kg/kg.py
     flags: dict
 
 

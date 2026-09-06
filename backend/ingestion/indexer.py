@@ -33,7 +33,7 @@ from sentence_transformers import SentenceTransformer
 from ingestion.chunker import Chunk, chunk_pages, validate_chunks
 from ingestion.loader import load_directory
 
-load_dotenv()
+load_dotenv(override=True)
 
 # psycopg's async mode is built on selector-based event loop APIs and raises
 # InterfaceError under asyncio's Windows default (ProactorEventLoop) —

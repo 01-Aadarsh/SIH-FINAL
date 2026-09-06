@@ -17,6 +17,16 @@ a tax. OFFLINE_MODE=true still uses Ollama as the primary attempt (falling
 back to Groq if it also fails, in case connectivity actually is available
 despite the flag) — the flag encodes "I know WiFi is down," not "guess."
 
+Multi-key rotation: GROQ_API_KEY, plus GROQ_API_KEY_2, GROQ_API_KEY_3, ...
+as many as are set — a real, reproduced failure mode this backs up
+against, not a hypothetical: a single free-tier key's 200k-token daily
+quota ran out mid-run during scripts/evaluate_pipeline.py's own benchmark
+runs. On a 429 (groq.RateLimitError) specifically, the next configured key
+is tried before giving up; any other failure (auth, network, a genuine
+model error) still raises immediately, since rotating keys wouldn't fix
+those anyway. See _advance_key_index()'s docstring for why the rotation
+state is process-lifetime, not per-request.
+
 Usage:
     python -m generation.llm_client "What does Section 3(p) say?"
     OFFLINE_MODE=true python -m generation.llm_client "..."
@@ -33,11 +43,11 @@ from collections.abc import AsyncIterator
 
 import ollama
 from dotenv import load_dotenv
-from groq import AsyncGroq
+from groq import AsyncGroq, RateLimitError
 
 from generation.prompts import SYSTEM_PROMPT, build_user_prompt
 
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -55,7 +65,28 @@ OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "45"))
 # its own default (e.g. once a driver fix is confirmed) instead of CPU-only.
 OLLAMA_NUM_GPU = int(os.getenv("OLLAMA_NUM_GPU", "0"))
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+def _load_groq_api_keys() -> list[str]:
+    """GROQ_API_KEY, plus GROQ_API_KEY_2, GROQ_API_KEY_3, ... for as long as
+    they're set consecutively (stops at the first gap). Lets one account's
+    free-tier daily token quota (a real, reproduced failure mode — see
+    scripts/evaluate_pipeline.py's benchmark runs, which exhausted a single
+    key's 200k-token daily limit mid-run) get backed up by additional keys
+    without any other module needing to know multiple keys exist at all."""
+    keys = []
+    primary = os.getenv("GROQ_API_KEY")
+    if primary:
+        keys.append(primary)
+    i = 2
+    while True:
+        key = os.getenv(f"GROQ_API_KEY_{i}")
+        if not key:
+            break
+        keys.append(key)
+        i += 1
+    return keys
+
+
+GROQ_API_KEYS: list[str] = _load_groq_api_keys()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
 # A stalled streaming response (network stall, backend hang) must not hang
@@ -65,7 +96,8 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 STREAM_CHUNK_TIMEOUT = float(os.getenv("STREAM_CHUNK_TIMEOUT", "20"))
 
 _ollama_client: ollama.AsyncClient | None = None
-_groq_client: AsyncGroq | None = None
+_groq_clients: dict[int, AsyncGroq] = {}
+_current_key_index = 0
 
 
 def _get_ollama_client() -> ollama.AsyncClient:
@@ -75,16 +107,68 @@ def _get_ollama_client() -> ollama.AsyncClient:
     return _ollama_client
 
 
-def _get_groq_client() -> AsyncGroq:
-    global _groq_client
-    if _groq_client is None:
-        if not GROQ_API_KEY:
-            raise RuntimeError(
-                "GROQ_API_KEY is not set — no LLM backend is available. Copy "
-                "env.example.txt to .env and fill it in."
+def _require_groq_keys() -> None:
+    if not GROQ_API_KEYS:
+        raise RuntimeError(
+            "No GROQ_API_KEY (or GROQ_API_KEY_2, GROQ_API_KEY_3, ...) is set — "
+            "no LLM backend is available. Copy env.example.txt to .env and fill it in."
+        )
+
+
+def _get_groq_client(index: int) -> AsyncGroq:
+    """One cached AsyncGroq client per configured key — see
+    GROQ_API_KEYS/_load_groq_api_keys() above."""
+    if index not in _groq_clients:
+        _groq_clients[index] = AsyncGroq(api_key=GROQ_API_KEYS[index])
+    return _groq_clients[index]
+
+
+def _advance_key_index(exhausted_index: int) -> bool:
+    """Moves the shared _current_key_index past a key that just hit
+    RateLimitError, so every later call in this process — not just the one
+    that discovered the exhaustion — starts directly on a working key
+    instead of re-hitting the same dead one first. Returns True if another
+    configured key remains, False if that was the last one. Persists for
+    the life of the process (module-level state, not per-request) since a
+    daily token-quota exhaustion doesn't clear until the provider's next
+    reset window, not on the next request."""
+    global _current_key_index
+    if exhausted_index == _current_key_index:
+        _current_key_index += 1
+    return _current_key_index < len(GROQ_API_KEYS)
+
+
+async def _groq_complete(messages: list[dict]) -> str:
+    """Non-streaming Groq call with automatic key rotation across
+    GROQ_API_KEYS: a real, reproduced failure mode — a single free-tier
+    key's 200k-token daily quota ran out mid-benchmark-run during
+    development (scripts/evaluate_pipeline.py), not a hypothetical this is
+    guarding against speculatively. Retries the next configured key only on
+    RateLimitError specifically (a 429) — any other failure (auth, network,
+    a genuine model error) still raises immediately rather than burning
+    through every key on an error rotation wouldn't fix."""
+    _require_groq_keys()
+    last_exc: Exception | None = None
+    index = _current_key_index
+    while index < len(GROQ_API_KEYS):
+        try:
+            client = _get_groq_client(index)
+            response = await client.chat.completions.create(
+                model=GROQ_MODEL, messages=messages, temperature=0.0
             )
-        _groq_client = AsyncGroq(api_key=GROQ_API_KEY)
-    return _groq_client
+            return response.choices[0].message.content.strip()
+        except RateLimitError as exc:
+            log.warning(
+                "Groq key #%d rate-limited (%s) — trying the next configured key",
+                index + 1, exc,
+            )
+            last_exc = exc
+            if not _advance_key_index(index):
+                break
+            index = _current_key_index
+    raise RuntimeError(
+        f"All {len(GROQ_API_KEYS)} configured Groq key(s) rate-limited: {last_exc}"
+    ) from last_exc
 
 
 def _build_messages(user_prompt: str, system_prompt: str | None) -> list[dict]:
@@ -126,11 +210,7 @@ async def acomplete(user_prompt: str, system_prompt: str | None = None) -> str:
             )
 
     try:
-        client = _get_groq_client()
-        response = await client.chat.completions.create(
-            model=GROQ_MODEL, messages=messages, temperature=0.0
-        )
-        return response.choices[0].message.content.strip()
+        return await _groq_complete(messages)
     except Exception as exc:
         raise RuntimeError(
             f"No LLM backend reachable (Groq failed: {exc}). Check GROQ_API_KEY "
@@ -140,10 +220,37 @@ async def acomplete(user_prompt: str, system_prompt: str | None = None) -> str:
 
 
 async def _stream_groq(messages: list[dict]) -> AsyncIterator[str]:
-    client = _get_groq_client()
-    stream = await client.chat.completions.create(
-        model=GROQ_MODEL, messages=messages, temperature=0.0, stream=True
-    )
+    """Same key-rotation as _groq_complete, but only around the call that
+    opens the stream — once a token has actually been yielded to the
+    caller, switching keys mid-stream can't be done seamlessly (same
+    reasoning astream_complete's Ollama-fallback docstring gives for not
+    restarting a partially-yielded stream on a different backend)."""
+    _require_groq_keys()
+    last_exc: Exception | None = None
+    index = _current_key_index
+    stream = None
+    while index < len(GROQ_API_KEYS):
+        try:
+            client = _get_groq_client(index)
+            stream = await client.chat.completions.create(
+                model=GROQ_MODEL, messages=messages, temperature=0.0, stream=True
+            )
+            break
+        except RateLimitError as exc:
+            log.warning(
+                "Groq key #%d rate-limited (%s) — trying the next configured key",
+                index + 1, exc,
+            )
+            last_exc = exc
+            if not _advance_key_index(index):
+                break
+            index = _current_key_index
+
+    if stream is None:
+        raise RuntimeError(
+            f"All {len(GROQ_API_KEYS)} configured Groq key(s) rate-limited: {last_exc}"
+        ) from last_exc
+
     aiter = stream.__aiter__()
     while True:
         try:
@@ -239,6 +346,12 @@ def generate(query: str, chunks: list[dict]) -> str:
 
 
 if __name__ == "__main__":
+    # Windows consoles default to cp1252, which can't encode characters a
+    # real Groq answer routinely contains (e.g. U+202F narrow no-break
+    # space) — same fix already applied in api/translation.py, api/tts.py,
+    # etc. for the same reason.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     query = " ".join(sys.argv[1:]) or "What does Section 3(p) say about traditional knowledge?"
     answer = generate(query, chunks=[])
     print(f"\nQuery: {query!r}\n")

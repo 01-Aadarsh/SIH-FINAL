@@ -216,6 +216,39 @@ def _compile_statutory_tag_rules():
         ),
         ("WIPO_GRATK", r"genetic resources?", "Genetic_Resources"),
         ("WIPO_GRATK", r"traditional knowledge", "Traditional_Knowledge"),
+
+        # data/international/Nagoya_Protocol_2010.pdf — Nagoya Protocol on
+        # Access to Genetic Resources and the Fair and Equitable Sharing of
+        # Benefits Arising from their Utilization (2010), downloaded from
+        # the CBD Secretariat's own site (cbd.int/abs/doc/protocol/
+        # nagoya-protocol-en.pdf) and verified to be genuine extractable
+        # treaty text, not reconstructed from memory. This is the
+        # international ABS counterpart to the domestic BD Act's Section
+        # 6/NBA process (BDA_Sec6_NBA_Approval above) — previously reserved
+        # as "Nagoya_ABS_Clearing_House" with no source document to point
+        # it at; the real PDF now exists so the rule is added for real.
+        ("Nagoya_Protocol", r".", "Nagoya_Protocol_2010"),  # whole document is this treaty
+        ("Nagoya_Protocol", r"access and benefit-sharing clearing[- ]house|abs clearing[- ]house", "Nagoya_ABS_Clearing_House"),
+
+        # data/international/Budapest_Treaty_1977.pdf — the Budapest Treaty
+        # on the International Recognition of the Deposit of Microorganisms
+        # for the Purposes of Patent Procedure (1977), extracted verbatim
+        # from WIPO Lex's server-rendered treaty text (wipo.int/wipolex/en/
+        # text/283784) — the wipolex PDF mirror for this specific treaty
+        # 404s/redirects rather than serving a file, so the article text
+        # was pulled from the HTML page itself (which is server-rendered,
+        # not JS-only) and rendered to PDF, with no LLM involved in
+        # producing the text. data/international/
+        # Budapest_Treaty_WIPO_Secretariat_Note.pdf (WO/INF/12) is a
+        # separate, distinct document — WIPO's official summary/status
+        # note, not the treaty articles themselves — kept as its own
+        # citable source rather than merged in, same reasoning as
+        # BD_Amendment_Act_2023 above. Previously reserved as
+        # "Budapest_Treaty_Deposit" with no source document; both real
+        # documents now exist so the rule is added for real.
+        ("Budapest_Treaty_1977", r".", "Budapest_Treaty_1977"),  # whole document is the treaty text
+        ("Budapest_Treaty_WIPO_Secretariat_Note", r".", "Budapest_Treaty_Secretariat_Note"),  # whole document is the note
+        ("Budapest_Treaty", r"deposit of microorganisms?|international depositary authority", "Budapest_Treaty_Deposit"),
     ]
     return [(src, re.compile(pat, re.IGNORECASE), tag) for src, pat, tag in rules]
 

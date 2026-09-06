@@ -102,9 +102,9 @@ See `/query/stream` below if you want tokens as they're generated instead
 |---|---|---|---|
 | `question` | Yes | — | The current question. Min length 1 — empty string is a `422`. |
 | `history` | No | `[]` | Prior turns, **oldest first**, current question NOT included (that's `question`). Used to rewrite `question` into a standalone query before retrieval (e.g. resolving "what about that section?" against the prior turn). Omit entirely or pass `[]` for a single-turn question. |
-| `jurisdiction` | No | `"india"` | `"india"` or `"international"` only — anything else is a `422`, never silently coerced. `"international"` currently has zero indexed documents (see repo's `data/international/README.md`), so it will abstain on every question — that's correct behavior, not a bug, until real international documents are indexed. |
+| `jurisdiction` | No | `"india"` | `"india"` or `"international"` only — anything else is a `422`, never silently coerced. `"international"` now has 6 real indexed documents (see repo's `data/international/README.md`); it still abstains correctly on anything genuinely outside that set rather than guessing. |
 | `language` | No | `"en-IN"` | One of the 23 codes below. Language of `question`; also what `answer` gets translated back into. `"en-IN"` skips translation entirely (zero added latency) — that's the same behavior as before this field existed, so a frontend that never sets it needs no changes. |
-| `synthesize_audio` | No | `false` | If `true`, also attempt to return `audio_base64` (see below). Adds real latency (an extra Groq call after generation) — leave `false` unless the UI actually has a play button visible. |
+| `synthesize_audio` | No | `false` | If `true`, also attempt to return `audio_base64` (see below). Adds real latency (an extra Sarvam TTS call after generation/translation) — leave `false` unless the UI actually has a play button visible. |
 
 **Valid `language` codes** (Sarvam AI's supported set, English + 22 Indian languages):
 `en-IN`, `hi-IN`, `bn-IN`, `gu-IN`, `kn-IN`, `ml-IN`, `mr-IN`, `od-IN`,
@@ -127,9 +127,40 @@ See `/query/stream` below if you want tokens as they're generated instead
   "confidence_score": 0.9971599613006763,
   "needs_clarification": false,
   "clarifying_questions": [],
-  "audio_base64": null
+  "audio_base64": null,
+  "related_provisions": [
+    {
+      "tag": "Traditional_Knowledge",
+      "relation": "cross_jurisdiction_counterpart",
+      "source_file": "WIPO_GRATK_Treaty_2024.pdf",
+      "page_number": 1,
+      "section_heading": "Article 1: Objectives",
+      "jurisdiction": "international"
+    },
+    {
+      "tag": "Mandatory_Patent_Disclosure",
+      "relation": "cross_jurisdiction_counterpart",
+      "source_file": "WIPO_GRATK_Treaty_2024.pdf",
+      "page_number": 4,
+      "section_heading": "ARTICLE 3",
+      "jurisdiction": "international"
+    },
+    {
+      "tag": "Genetic_Resources",
+      "relation": "cross_jurisdiction_counterpart",
+      "source_file": "WIPO_GRATK_Treaty_2024.pdf",
+      "page_number": 1,
+      "section_heading": "Article 1: Objectives",
+      "jurisdiction": "international"
+    }
+  ]
 }
 ```
+Note the `jurisdiction: "india"` request still only *answers* from Indian
+sources (`citations` above are all domestic) — `related_provisions`
+surfaces the WIPO GRATK Treaty as a cross-jurisdiction *pointer* alongside
+it, not as part of the grounded answer itself. That's the intended
+behavior, not the jurisdiction switch leaking.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -142,7 +173,8 @@ See `/query/stream` below if you want tokens as they're generated instead
 | `confidence_score` | float | **New.** The cross-encoder reranker's calibrated confidence (0-1) in the single strongest retrieved chunk — the same number the backend's internal retry logic thresholds against. High (e.g. the `0.997` above) means retrieval found something clearly on-topic. **Not a guarantee `flags.abstained` is `false`** — a well-grounded retrieval can still end in abstention if the model judges the specific retrieved text doesn't actually answer the question asked (see the abstention example below, where `confidence_score` is near zero for a different, expected reason: nothing relevant exists in this corpus at all). Reflects retrieval quality, not answer correctness. |
 | `needs_clarification` | boolean | `true` when the question's keywords genuinely span 2+ formulation categories (e.g. mentions both "nutraceutical" and "proprietary formulation"). **Informational, not blocking** — `answer` still answers normally, using the first-matched category. |
 | `clarifying_questions` | array of strings | Always `[]` when `needs_clarification` is `false`. When non-empty, currently always exactly one string — a suggested follow-up question. Nothing stops you from sending it as the next `history` turn if the user picks it. |
-| `audio_base64` | string \| null | Base64-encoded WAV, **always English speech regardless of `language`** — there is no Indian-language TTS voice available, so this reads the pre-translation English answer, never the translated one. Do not present this as being "in the user's language." **Currently always `null`** — the Groq account backing this hasn't accepted the TTS model's usage terms yet; this is a real, not-yet-resolved gap, not a per-request failure. Safe to send `synthesize_audio: true` regardless — it degrades to `null`, never errors. |
+| `audio_base64` | string \| null | Base64-encoded WAV, speech of the answer **in `language` itself** (Sarvam's Bulbul TTS) — not English-only. `null` when `synthesize_audio` was `false`, `language` isn't one of the 11 Bulbul supports (`en-IN`, `hi-IN`, `bn-IN`, `gu-IN`, `kn-IN`, `ml-IN`, `mr-IN`, `od-IN`, `pa-IN`, `ta-IN`, `te-IN` — see `backend/api/tts.py::BULBUL_SUPPORTED_LANGUAGES`), or synthesis failed for any reason. Safe to send `synthesize_audio: true` regardless of language — it degrades to `null`, never errors. |
+| `related_provisions` | array | **New.** Knowledge-graph cross-references (`backend/graph_kg/`) — each entry `{tag, relation, source_file, page_number, section_heading, jurisdiction}` points at a real, separately-indexed chunk; nothing here is new LLM-written text. `relation` is `cross_jurisdiction_counterpart` (deliberately crosses the `jurisdiction` switch — e.g. a `jurisdiction: "india"` Section 3(p) question surfacing the WIPO GRATK Treaty's international disclosure obligation as a *pointer*, while `answer`/`citations` themselves stay scoped to `jurisdiction`, per the PS's "keep the two answer-sets visibly separate" requirement) or `co_occurs_with` (tags that repeatedly co-occur in the real corpus, same jurisdiction or not). Always `[]` on an abstention. See the example below. |
 
 **Error responses** — see "Error handling" below.
 
@@ -241,16 +273,19 @@ it's typed, or just wait for `done` if you don't need a typing effect.)
   "formulation_category": "classical",
   "confidence_score": 0.9994600051404637,
   "needs_clarification": false,
-  "clarifying_questions": []
+  "clarifying_questions": [],
+  "related_provisions": []
 }
 ```
 Same shape as `/query`'s response body, minus `audio_base64` (streaming
 never synthesizes audio — there's no `synthesize_audio` support on this
-endpoint yet). **The disclaimer streams as one additional real `token`
-event** after the answer's own tokens end (not spliced into `done` only) —
-a client rendering tokens as they arrive sees it appear the same way the
-rest of the answer did, then `done.answer` already includes it, so you
-don't need to append it yourself either way.
+endpoint yet) — `related_provisions` (see below) IS included here, unlike
+`audio_base64`, since it's a cheap deterministic lookup with no per-token
+buffering problem to solve. **The disclaimer streams as one additional
+real `token` event** after the answer's own tokens end (not spliced into
+`done` only) — a client rendering tokens as they arrive sees it appear the
+same way the rest of the answer did, then `done.answer` already includes
+it, so you don't need to append it yourself either way.
 
 **`error`** — sent instead of `done` on failure, connection then closes:
 ```

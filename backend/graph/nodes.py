@@ -23,6 +23,7 @@ from generation.llm_client import acomplete, agenerate
 from generation.prompts import append_disclaimer
 from graph.formulation import CATEGORY_STATUTORY_TAGS, triage_formulation
 from graph.state import DEFAULT_FLAGS, DEFAULT_JURISDICTION, GraphState
+from graph_kg.kg import related_provisions_for
 from retrieval.bm25_search import search as bm25_search_sync
 from retrieval.dense_search import search as dense_search
 from retrieval.fusion import fuse
@@ -242,6 +243,32 @@ def attach_citations_node(state: GraphState) -> dict:
     if (state.get("flags") or {}).get("abstained"):
         return {"citations": []}
     return {"citations": attach_citations(state["reranked"])}
+
+
+def expand_related_provisions_node(state: GraphState) -> dict:
+    """Knowledge-graph enrichment (graph_kg/kg.py) — deterministic, no I/O,
+    no LLM call, same category as triage_formulation_node. Runs off the
+    statutory tags actually carried by this query's retrieved chunks (not
+    just the formulation category's own tag set, which is a coarser,
+    query-level guess) so a related provision always traces back to what
+    was genuinely retrieved for this specific question.
+
+    No sources on an abstention, same reasoning as attach_citations_node:
+    there's nothing retrieved that actually grounded an answer, so there's
+    nothing to point onward from either. Never raises — related_provisions_for()
+    degrades to [] on any missing/stale graph file, which this surfaces
+    the same way (an empty list, not a missing key), so API callers never
+    need a None check.
+    """
+    if (state.get("flags") or {}).get("abstained"):
+        return {"related_provisions": []}
+
+    chunk_tags = {
+        tag
+        for chunk in state.get("reranked") or []
+        for tag in (chunk.get("statutory_tags") or [])
+    }
+    return {"related_provisions": related_provisions_for(sorted(chunk_tags))}
 
 
 async def run_retrieval_stage(rewritten_query: str, jurisdiction: str) -> GraphState:

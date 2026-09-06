@@ -14,9 +14,12 @@ buffer, not covered here) additionally wraps the graph in a translation
 bridge (api/translation.py, Sarvam AI): the question translates to English
 before retrieval, the answer translates back to QueryRequest.language after
 generation — retrieval and the LLM prompt never see anything but English.
-Optionally also returns a spoken-English reading of the answer via Groq TTS
-(api/tts.py, QueryRequest.synthesize_audio) — English-only regardless of
-`language`, since Groq has no Indian-language voice to speak in.
+Optionally also returns a spoken reading of the *translated* answer via
+Sarvam's Bulbul TTS (api/tts.py, QueryRequest.synthesize_audio), in
+`language` itself when Bulbul supports it (11 of the languages
+api/translation.py can translate into — see
+api/tts.py::BULBUL_SUPPORTED_LANGUAGES) or skipped otherwise, never a
+mismatched English voice over translated text.
 
 Cancellation: because the graph is now driven by real async I/O (async
 psycopg, AsyncGroq/ollama.AsyncClient) instead of a thread-pool future,
@@ -39,26 +42,29 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from api.asr import UnsupportedAudioFormat, transcribe_audio
 from api.translation import TARGET_LANGUAGE_CODES, translate_text
-from api.tts import synthesize_speech
+from api.tts import BULBUL_SUPPORTED_LANGUAGES, synthesize_speech
+from compliance.form_navigator import match_forms
 from generation.citation import attach_citations, is_abstention
 from generation.llm_client import astream_generate
 from generation.prompts import append_disclaimer
 from graph.build_graph import build_graph
-from graph.nodes import rewrite_query, run_retrieval_stage
+from graph.nodes import expand_related_provisions_node, rewrite_query, run_retrieval_stage
 from graph.state import DEFAULT_FLAGS
 from ingestion.indexer import run as run_ingestion
 
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
@@ -80,6 +86,14 @@ CORS_ORIGINS = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").spli
 # deployment. Set ADMIN_TOKEN before deploying anywhere reachable from the
 # internet.
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+
+# Same base directory ingestion/loader.py::load_directory reads from — a
+# citation's source_file is always a bare filename found directly under one
+# of these two, never a path outside them (india PDFs live in DATA_DIR
+# itself, international ones under DATA_DIR/international/, per that
+# module's own docstring).
+DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
+SOURCE_SEARCH_DIRS = [DATA_DIR, DATA_DIR / "international"]
 
 app = FastAPI(
     title="IP-SAKTI Sahayak API",
@@ -203,6 +217,21 @@ class Flags(BaseModel):
     )
 
 
+class FormCard(BaseModel):
+    """One official government form/registry match — see
+    compliance/form_navigator.py. Every field here is what that module's
+    catalog actually stores, not additional computed content."""
+
+    form_id: str
+    agency: str = Field(description='"NBA" (National Biodiversity Authority) or "IPO" (Indian Patent Office).')
+    jurisdiction: str = Field(description='Always "india" — see compliance/form_navigator.py.')
+    title: str
+    statutory_mandate: str
+    submission_portal: str
+    required_attachments: list[str]
+    deadline: str
+
+
 class QueryResponse(BaseModel):
     answer: str = Field(
         description=(
@@ -242,11 +271,27 @@ class QueryResponse(BaseModel):
     audio_base64: str | None = Field(
         default=None,
         description=(
-            "Base64-encoded WAV, always a reading of the ENGLISH answer "
-            "regardless of `language`/`answer` (Groq has no Indian-language "
-            "voice — see api/tts.py) — do not present this as being in the "
-            "user's selected language. Null if synthesize_audio was false, "
-            "GROQ_TTS_VOICE isn't configured, or synthesis failed."
+            "Base64-encoded WAV of the answer read aloud in `language` "
+            "itself (Sarvam's Bulbul TTS — see api/tts.py). Null if "
+            "synthesize_audio was false, SARVAM_API_KEY isn't configured, "
+            "`language` isn't one of the 11 Bulbul supports (see "
+            "api/tts.py::BULBUL_SUPPORTED_LANGUAGES), or synthesis failed."
+        ),
+    )
+    related_provisions: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Knowledge-graph cross-references (graph_kg/kg.py) — each entry "
+            "is `{tag, relation, source_file, page_number, section_heading, "
+            "jurisdiction}` pointing at a real, separately-indexed chunk, "
+            "never new legal text. `relation` is `cross_jurisdiction_counterpart` "
+            "(e.g. a domestic Section 3(p) question surfacing the WIPO GRATK "
+            "Treaty's disclosure obligation — deliberately visible across the "
+            "jurisdiction switch, not conflated with `answer`/`citations`, "
+            "which stay scoped to `jurisdiction`) or `co_occurs_with` (tags "
+            "that repeatedly appear together in the real corpus). Always `[]` "
+            "on an abstention, and always `[]` (never an error) if the graph "
+            "hasn't been built yet — see graph_kg/build_kg.py."
         ),
     )
     needs_clarification: bool = Field(
@@ -263,6 +308,25 @@ class QueryResponse(BaseModel):
     clarifying_questions: list[str] = Field(
         default_factory=list,
         description="Always [] when needs_clarification is false.",
+    )
+    actionable_forms: list[FormCard] = Field(
+        default_factory=list,
+        description=(
+            "Official government forms this question likely needs next "
+            "(compliance/form_navigator.py) — e.g. a patent question about "
+            "an Ayurvedic formulation surfacing NBA Form 7 (prior approval "
+            "before applying for IPR based on Indian biological resources) "
+            "and IPO Form 1/2 (patent application/specification). Matched "
+            "deterministically (keywords + formulation_category + "
+            "statutory_tags), same no-LLM-call philosophy as "
+            "formulation_category itself. Always `[]` for "
+            "`jurisdiction: \"international\"` — every catalog entry is a "
+            "domestic Indian registry; this abstains rather than guessing "
+            "at an international equivalent, same rule international "
+            "retrieval already follows. First-pass reference data, not "
+            "verified against live government sources on every field — see "
+            "compliance/form_navigator.py's module docstring."
+        ),
     )
 
 
@@ -281,6 +345,26 @@ class IngestResponse(BaseModel):
     status: str
 
 
+class TranscribeResponse(BaseModel):
+    transcript: str
+    detected_language: str = Field(
+        description=(
+            "The BCP-47 code Sarvam's Saaras model detected/used (see "
+            "api/asr.py), or the literal 'unknown' if detection failed — "
+            "never fabricated when detection genuinely couldn't resolve it."
+        )
+    )
+
+
+class VoiceQueryResponse(QueryResponse):
+    """Everything QueryResponse has, plus what ASR itself produced — a
+    caller gets both what was heard and what was answered in one response,
+    rather than needing to correlate two separate calls."""
+
+    transcribed_text: str
+    detected_language: str
+
+
 @app.get(
     "/health",
     response_model=HealthResponse,
@@ -291,36 +375,57 @@ def health():
     return HealthResponse(status="ok")
 
 
-@app.post(
-    "/query",
-    response_model=QueryResponse,
-    summary="Answer a question from the indexed documents",
+@app.get(
+    "/sources/{filename}",
+    summary="Serve a source PDF a citation points at",
     description=(
-        "Runs the full pipeline: translate question to English (if needed) "
-        "-> query rewrite -> hybrid retrieval -> cross-encoder reranking -> "
-        "grounded generation -> citation attachment -> translate answer back "
-        "to `language` (if needed) -> optional English TTS. Answers only "
-        "from retrieved context; abstains (flags.abstained=true) if the "
-        "context doesn't contain the answer — including when "
-        "jurisdiction='international' finds no indexed documents. Single "
-        "JSON response; see /query/stream for token streaming (English "
-        "only — translation isn't wired into the streaming path)."
+        "Backs the frontend's 'View source PDF' link on every citation — "
+        "`source_file` in a Citation object is always a bare filename that "
+        "actually exists under one of these two directories, never an "
+        "arbitrary path. `filename` is resolved by basename only (rejects "
+        "any '/' or '..' component) and only ever served from `DATA_DIR` or "
+        "`DATA_DIR/international/` — the same two locations "
+        "ingestion/loader.py indexes from, nothing else on disk is reachable "
+        "through this endpoint."
     ),
     responses={
-        422: {"description": "Invalid request body (e.g. jurisdiction not 'india' or 'international')."},
-        503: {"description": "Groq (or Ollama, under OFFLINE_MODE) could not be reached."},
-        504: {"description": "Request exceeded REQUEST_TIMEOUT with no LLM response."},
-        500: {"description": "Unhandled internal error."},
+        400: {"description": "filename contains a path separator or '..' — rejected before any file lookup."},
+        404: {"description": "No file by that exact name in data/ or data/international/."},
     },
 )
-async def query(req: QueryRequest):
+def get_source(filename: str):
+    safe_name = Path(filename).name
+    if safe_name != filename or safe_name in ("", ".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+
+    for directory in SOURCE_SEARCH_DIRS:
+        candidate = directory / safe_name
+        if candidate.is_file():
+            return FileResponse(candidate, media_type="application/pdf", filename=safe_name)
+
+    raise HTTPException(status_code=404, detail=f"No source file named {safe_name!r} found.")
+
+
+async def run_query(
+    question: str,
+    history: list[dict],
+    jurisdiction: str,
+    language: str,
+    synthesize_audio: bool,
+) -> QueryResponse:
+    """
+    The actual /query pipeline, factored out so /query itself and
+    /api/v1/voice/query (api/asr.py's transcript piped straight in) share
+    one implementation instead of two copies drifting apart. Takes plain
+    values, not QueryRequest, so a caller that got its `question` from
+    ASR rather than JSON doesn't need to construct a fake request object.
+    """
     app_graph = _get_graph()
-    history = [turn.model_dump() for turn in req.history]
 
     # STEP A: translate the question into English. A no-op call (returns
     # immediately, no HTTP request) when language is already English —
     # translate_text's own fallback rule, not special-cased here.
-    english_question = await translate_text(req.question, req.language, "en-IN")
+    english_question = await translate_text(question, language, "en-IN")
 
     try:
         result = await asyncio.wait_for(
@@ -328,7 +433,7 @@ async def query(req: QueryRequest):
                 {
                     "query": english_question,
                     "history": history,
-                    "jurisdiction": req.jurisdiction,
+                    "jurisdiction": jurisdiction,
                     "flags": dict(DEFAULT_FLAGS),
                 }
             ),
@@ -348,21 +453,64 @@ async def query(req: QueryRequest):
 
     english_answer = result["answer"]
 
-    # TTS reads the pre-translation English answer — Groq has no
-    # Indian-language voice, so synthesizing from a translated answer would
-    # either fail outright or mispronounce every non-English word. Runs
-    # concurrently with STEP C's translation call: the two are independent
-    # (different providers, different inputs) and neither depends on the
-    # other's result, so there's no reason to pay their latencies serially.
-    translate_out = translate_text(english_answer, "en-IN", req.language)
-    audio_task = (
-        asyncio.ensure_future(synthesize_speech(english_answer, "en-IN"))
-        if req.synthesize_audio
-        else None
-    )
+    # TTS now speaks the *translated* answer, in that same language
+    # (Sarvam's Bulbul TTS supports 11 of the languages translate_text()
+    # can target — see api/tts.py::BULBUL_SUPPORTED_LANGUAGES; unsupported
+    # languages skip audio there rather than guessing, so that check isn't
+    # duplicated here). For en-IN, translation is a no-op, so audio can
+    # still start immediately from english_answer without waiting on it —
+    # the same concurrency this had before. Every other language must wait
+    # for the real translated text first, since that's what gets voiced;
+    # synthesizing from English while displaying Hindi would be worse than
+    # the small added latency.
+    translate_out = translate_text(english_answer, "en-IN", language)
 
-    translated_answer = await translate_out
+    if language == "en-IN" and synthesize_audio:
+        audio_task = asyncio.ensure_future(synthesize_speech(english_answer, "en-IN"))
+        translated_answer = await translate_out
+    elif synthesize_audio:
+        translated_answer = await translate_out
+        audio_task = asyncio.ensure_future(synthesize_speech(translated_answer, language))
+    else:
+        translated_answer = await translate_out
+        audio_task = None
+
     audio_base64 = await audio_task if audio_task is not None else None
+
+    # Deterministic, no LLM call — same keyword+category+tag matcher the
+    # standalone /api/v1/compliance/forms endpoint uses. Every catalog
+    # entry is a domestic Indian registry, so international queries get []
+    # here (match_forms's own jurisdiction check), not a guess. No forms on
+    # an abstention, same rule as citations/related_provisions: a real bug
+    # caught by scripts/evaluate_pipeline.py's out-of-scope trap
+    # queries — formulation_category defaults to "classical" (see
+    # graph/formulation.py::triage_formulation, "zero matches still
+    # defaults to classical") even for something like "what is the capital
+    # of France?", which was silently attaching an NBA form to completely
+    # unrelated abstained answers before this guard existed.
+    flags = result.get("flags") or {}
+    # statutory_tags here is the tags actually carried by the chunks that
+    # grounded this specific answer (same source expand_related_provisions_node
+    # uses for the knowledge graph) — not result["statutory_tags"], which is
+    # graph/formulation.py's coarse per-CATEGORY tag list. Using the
+    # category list was a second false-positive source alongside the
+    # abstention bug above: "classical" already includes
+    # BDA_Sec7_SBB_Exemption as one of its five typical tags, so every
+    # classical-defaulted answer looked like a tag hit for NBA_FORM_8
+    # regardless of what the retrieved chunks actually said.
+    chunk_tags = sorted({
+        tag for chunk in (result.get("reranked") or []) for tag in (chunk.get("statutory_tags") or [])
+    })
+    actionable_forms = (
+        []
+        if flags.get("abstained")
+        else match_forms(
+            intent=english_question,
+            jurisdiction=jurisdiction,
+            formulation_category=result.get("formulation_category"),
+            statutory_tags=chunk_tags,
+        )
+    )
 
     return QueryResponse(
         answer=translated_answer,
@@ -373,6 +521,41 @@ async def query(req: QueryRequest):
         needs_clarification=result.get("needs_clarification") or False,
         clarifying_questions=result.get("clarifying_questions") or [],
         audio_base64=audio_base64,
+        related_provisions=result.get("related_provisions") or [],
+        actionable_forms=actionable_forms,
+    )
+
+
+@app.post(
+    "/query",
+    response_model=QueryResponse,
+    summary="Answer a question from the indexed documents",
+    description=(
+        "Runs the full pipeline: translate question to English (if needed) "
+        "-> query rewrite -> hybrid retrieval -> cross-encoder reranking -> "
+        "grounded generation -> citation attachment -> translate answer back "
+        "to `language` (if needed) -> optional TTS -> actionable-forms "
+        "match. Answers only from retrieved context; abstains "
+        "(flags.abstained=true) if the context doesn't contain the answer "
+        "— including when jurisdiction='international' finds no indexed "
+        "documents. Single JSON response; see /query/stream for token "
+        "streaming, or /api/v1/voice/query for audio-in."
+    ),
+    responses={
+        422: {"description": "Invalid request body (e.g. jurisdiction not 'india' or 'international')."},
+        503: {"description": "Groq (or Ollama, under OFFLINE_MODE) could not be reached."},
+        504: {"description": "Request exceeded REQUEST_TIMEOUT with no LLM response."},
+        500: {"description": "Unhandled internal error."},
+    },
+)
+async def query(req: QueryRequest):
+    history = [turn.model_dump() for turn in req.history]
+    return await run_query(
+        question=req.question,
+        history=history,
+        jurisdiction=req.jurisdiction,
+        language=req.language,
+        synthesize_audio=req.synthesize_audio,
     )
 
 
@@ -431,6 +614,30 @@ async def query_stream(req: QueryRequest):
             abstained = is_abstention(raw_answer)
             citations = [] if abstained else attach_citations(reranked)
             flags["abstained"] = abstained
+            # No I/O, no LLM call — cheap enough to run on every stream too,
+            # unlike translation/TTS (excluded from /query/stream for a real
+            # technical reason: sentence-boundary detection against a
+            # partial token buffer). No such reason applies here.
+            related_provisions = expand_related_provisions_node(
+                {"reranked": reranked, "flags": flags}
+            )["related_provisions"]
+            # No forms on an abstention, and per-CHUNK tags rather than
+            # statutory_tags (the category-level list) -- same two fixes
+            # as run_query() above, see its comments for the concrete
+            # false-positive each one caught.
+            chunk_tags = sorted({
+                tag for chunk in reranked for tag in (chunk.get("statutory_tags") or [])
+            })
+            actionable_forms = (
+                []
+                if abstained
+                else match_forms(
+                    intent=rewritten,
+                    jurisdiction=req.jurisdiction,
+                    formulation_category=formulation_category,
+                    statutory_tags=chunk_tags,
+                )
+            )
 
             # The disclaimer streams as one more real token event — not
             # silently spliced into the `done` payload only — so a client
@@ -450,6 +657,8 @@ async def query_stream(req: QueryRequest):
                     "confidence_score": retrieval_state.get("confidence_score") or 0.0,
                     "needs_clarification": retrieval_state["needs_clarification"],
                     "clarifying_questions": retrieval_state["clarifying_questions"],
+                    "related_provisions": related_provisions,
+                    "actionable_forms": actionable_forms,
                 },
             )
         except asyncio.TimeoutError:
@@ -503,3 +712,134 @@ async def ingest(req: IngestRequest, x_admin_token: str | None = Header(default=
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}")
 
     return IngestResponse(status="ok")
+
+
+def _raise_for_asr_error(exc: Exception) -> None:
+    """Shared error mapping for both voice endpoints below — a caller-input
+    problem (bad format, bad language_code) is a 4xx; Sarvam itself being
+    unreachable or erroring is a 502 (this server's upstream failed, not
+    the request itself)."""
+    if isinstance(exc, UnsupportedAudioFormat):
+        raise HTTPException(status_code=415, detail=str(exc))
+    if isinstance(exc, ValueError):
+        raise HTTPException(status_code=422, detail=str(exc))
+    if isinstance(exc, RuntimeError):
+        raise HTTPException(status_code=502, detail=str(exc))
+    raise exc
+
+
+@app.post(
+    "/api/v1/voice/transcribe",
+    response_model=TranscribeResponse,
+    summary="Transcribe spoken audio to text",
+    description=(
+        "Speech-to-text via Sarvam AI's Saaras model (api/asr.py). Accepts "
+        "`.wav`, `.mp3`, `.m4a`, or `.webm`. `language_code` defaults to "
+        "'unknown' (auto-detect); explicit codes include 'hi-IN', 'ta-IN', "
+        "'en-IN' and Sarvam's other supported Indian languages. Does NOT "
+        "fail open — a Sarvam failure is a real error response, not a "
+        "silently empty transcript, since there's no reasonable fallback "
+        "text to substitute (unlike api/translation.py and api/tts.py)."
+    ),
+    responses={
+        415: {"description": "Audio file extension not one of .wav/.mp3/.m4a/.webm."},
+        422: {"description": "Invalid language_code."},
+        502: {"description": "Sarvam's speech-to-text API failed or was unreachable."},
+    },
+)
+async def voice_transcribe(
+    file: UploadFile = File(..., description="Audio file: .wav, .mp3, .m4a, or .webm."),
+    language_code: str = Form("unknown"),
+):
+    audio_bytes = await file.read()
+    try:
+        transcript, detected_language = await transcribe_audio(
+            audio_bytes, file.filename or "", language_code
+        )
+    except (UnsupportedAudioFormat, ValueError, RuntimeError) as exc:
+        _raise_for_asr_error(exc)
+
+    return TranscribeResponse(transcript=transcript, detected_language=detected_language)
+
+
+@app.post(
+    "/api/v1/voice/query",
+    response_model=VoiceQueryResponse,
+    summary="Transcribe spoken audio, then answer it through the full /query pipeline",
+    description=(
+        "Composite of /api/v1/voice/transcribe -> /query: runs ASR on the "
+        "uploaded audio, then pipes the transcript straight into the same "
+        "run_query() pipeline /query itself uses (translate -> retrieve -> "
+        "rerank -> generate -> cite -> translate back -> TTS -> actionable-"
+        "forms match). The response is /query's full response shape plus "
+        "`transcribed_text` and `detected_language`. If Saaras's detected "
+        "language isn't one of the languages api/translation.py/api/tts.py "
+        "support, the answer is generated in English (`en-IN`) rather than "
+        "guessing at an unsupported target language."
+    ),
+    responses={
+        415: {"description": "Audio file extension not one of .wav/.mp3/.m4a/.webm."},
+        422: {"description": "Invalid language_code or jurisdiction."},
+        502: {"description": "Sarvam's speech-to-text API failed or was unreachable."},
+        503: {"description": "Groq (or Ollama, under OFFLINE_MODE) could not be reached."},
+        504: {"description": "Request exceeded REQUEST_TIMEOUT with no LLM response."},
+        500: {"description": "Unhandled internal error."},
+    },
+)
+async def voice_query(
+    file: UploadFile = File(..., description="Audio file: .wav, .mp3, .m4a, or .webm."),
+    language_code: str = Form("unknown"),
+    jurisdiction: Literal["india", "international"] = Form("india"),
+    synthesize_audio: bool = Form(False),
+):
+    audio_bytes = await file.read()
+    try:
+        transcript, detected_language = await transcribe_audio(
+            audio_bytes, file.filename or "", language_code
+        )
+    except (UnsupportedAudioFormat, ValueError, RuntimeError) as exc:
+        _raise_for_asr_error(exc)
+
+    # detected_language may be "unknown" (detection failed) or a code
+    # Saaras supports but translate_text()/synthesize_speech() don't (the
+    # two Sarvam APIs have independently documented language coverage —
+    # see api/asr.py's module docstring) — fall back to en-IN rather than
+    # pass an unsupported value into the graph as `language`.
+    response_language = detected_language if detected_language in TARGET_LANGUAGE_CODES else "en-IN"
+
+    query_response = await run_query(
+        question=transcript,
+        history=[],
+        jurisdiction=jurisdiction,
+        language=response_language,
+        synthesize_audio=synthesize_audio,
+    )
+
+    return VoiceQueryResponse(
+        transcribed_text=transcript,
+        detected_language=detected_language,
+        **query_response.model_dump(),
+    )
+
+
+@app.get(
+    "/api/v1/compliance/forms",
+    summary="Look up official government forms matching an intent",
+    description=(
+        "Deterministic keyword match (compliance/form_navigator.py, no LLM "
+        "call) against the NBA/IPO form catalog — e.g. `intent=patent my "
+        "Ayurvedic formulation` surfaces NBA Form 7 (prior approval before "
+        "applying for IPR based on Indian biological resources) and IPO "
+        "Form 1/2. Every catalog entry is a domestic Indian registry, so "
+        "`jurisdiction=international` always returns an empty list rather "
+        "than guessing at an international equivalent. First-pass "
+        "reference data — see that module's docstring for exactly which "
+        "form numbers were corrected against the real, verified statute "
+        "text already indexed in this project, and why."
+    ),
+)
+def compliance_forms(
+    intent: str,
+    jurisdiction: Literal["india", "international"] = "india",
+):
+    return {"forms": match_forms(intent=intent, jurisdiction=jurisdiction)}

@@ -39,7 +39,7 @@ from sentence_transformers import CrossEncoder
 
 from retrieval.fusion import search as fused_search
 
-load_dotenv()
+load_dotenv(override=True)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
