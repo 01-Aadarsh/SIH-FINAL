@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm run build
+
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: backend/requirements.txt
+      - run: pip install -r requirements.txt
+      # The real suite needs a live Postgres+pgvector DB and real Groq calls
+      # (see backend/tests/ — deliberately not mocked). Running that here
+      # would need DATABASE_URL/GROQ_API_KEY as repo secrets and would spend
+      # real LLM quota on every push, so CI only verifies the test files
+      # themselves import and collect cleanly, catching syntax/import
+      # errors without touching any external service.
+      - run: python -m pytest --collect-only -q
