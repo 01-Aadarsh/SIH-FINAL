@@ -43,6 +43,7 @@ import json
 import logging
 import io
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -98,6 +99,11 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 # module's own docstring).
 DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
 SOURCE_SEARCH_DIRS = [DATA_DIR, DATA_DIR / "international"]
+
+# Every compliance/form_navigator.py FORM_CATALOG id is shaped like
+# NBA_FORM_7 or IPO_FORM_18A. Used to reject a download_compliance_form
+# path param before it can reach the Content-Disposition header.
+FORM_ID_PATTERN = re.compile(r"[A-Z0-9_]+")
 
 _graph = None
 
@@ -978,6 +984,12 @@ def compliance_forms(
     responses={404: {"description": "No form with that form_id in the catalog."}},
 )
 def download_compliance_form(form_id: str):
+    # Every FORM_CATALOG id is `[A-Z0-9_]+` (see form_navigator.py); reject
+    # anything else up front instead of letting request input reach the
+    # Content-Disposition header below, even indirectly via a catalog match.
+    if not FORM_ID_PATTERN.fullmatch(form_id):
+        raise HTTPException(status_code=404, detail=f"No form with id {form_id!r}.")
+
     try:
         docx_bytes = generate_form_docx(form_id)
     except UnknownFormId:
