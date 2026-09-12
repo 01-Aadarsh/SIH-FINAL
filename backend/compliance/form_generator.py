@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import sys
 from io import BytesIO
+from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -113,6 +114,16 @@ if __name__ == "__main__":
     except UnknownFormId as exc:
         print(str(exc))
         sys.exit(1)
-    with open(output_path, "wb") as f:
+
+    # CLI args are an untrusted source (CWE-22): resolve and confirm the
+    # target stays under the current directory before writing, instead of
+    # passing an arbitrary caller-supplied path straight to open().
+    cwd = Path.cwd().resolve()
+    resolved_path = (cwd / output_path).resolve()
+    if resolved_path != cwd and cwd not in resolved_path.parents:
+        print(f"Refusing to write outside the current directory: {output_path}")
+        sys.exit(1)
+
+    with open(resolved_path, "wb") as f:
         f.write(docx_bytes)
-    print(f"Wrote {output_path}")
+    print(f"Wrote {resolved_path}")
